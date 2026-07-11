@@ -17,6 +17,18 @@ interface PlannerSettings {
   focusMinutes: number;
   studyFolder: string;
   workFolder: string;
+  activeFocus?: ActiveFocusSession;
+}
+
+interface ActiveFocusSession {
+  filePath: string;
+  taskId: string;
+  taskName: string;
+  category: string;
+  durationMs: number;
+  focusedMs: number;
+  runningAt: number | null;
+  startedAt: number;
 }
 
 interface PlanTask {
@@ -105,6 +117,8 @@ function completionText(provider: ProviderId, response: unknown): string | undef
 
 export default class AIPlannerPlugin extends Plugin {
   pluginSettings!: PlannerSettings;
+  private focusStatusEl!: HTMLElement;
+  private finishingFocus = false;
 
   async onload(): Promise<void> {
     this.pluginSettings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -117,18 +131,125 @@ export default class AIPlannerPlugin extends Plugin {
     this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
     this.addRibbonIcon("calendar-plus", "Create AI plan", () => new PlanInputModal(this.app, this).open());
     this.addRibbonIcon("timer", "Start focus session", () => this.openFocusForActiveNote());
+    this.focusStatusEl = this.addStatusBarItem();
+    this.focusStatusEl.addClass("ai-planner-focus-status");
+    this.registerDomEvent(this.focusStatusEl, "click", () => void this.restoreFocusTimer());
+    this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
+    await this.refreshFocusStatus();
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.pluginSettings);
   }
 
-  openFocusForActiveNote(): void {
+  getActiveFocus(): ActiveFocusSession | undefined {
+    return this.pluginSettings.activeFocus;
+  }
+
+  async openFocusForActiveNote(): Promise<void> {
+    if (this.pluginSettings.activeFocus) {
+      await this.restoreFocusTimer();
+      return;
+    }
     const file = this.app.workspace.getActiveFile();
     if (!file) { new Notice("请先打开一个计划笔记 / Open a plan note first."); return; }
     const tasks = extractFocusTasks(this.app, file);
     if (!tasks.length) { new Notice("当前笔记没有可专注的计划任务 / No plan tasks found."); return; }
     new FocusTaskPickerModal(this.app, this, file, tasks).open();
+  }
+
+  async startFocus(file: TFile, task: FocusTask, minutes: number): Promise<void> {
+    if (this.pluginSettings.activeFocus) {
+      new Notice("已有进行中的专注 / A focus session is already active.");
+      await this.restoreFocusTimer();
+      return;
+    }
+    this.pluginSettings.activeFocus = {
+      filePath: file.path,
+      taskId: task.id,
+      taskName: task.name,
+      category: task.category,
+      durationMs: Math.max(1, minutes) * 60000,
+      focusedMs: 0,
+      runningAt: Date.now(),
+      startedAt: Date.now()
+    };
+    await this.saveSettings();
+    await this.refreshFocusStatus();
+    new FocusTimerModal(this.app, this).open();
+  }
+
+  async toggleFocusPause(): Promise<void> {
+    const session = this.pluginSettings.activeFocus;
+    if (!session) return;
+    if (session.runningAt !== null) {
+      session.focusedMs += Math.max(0, Date.now() - session.runningAt);
+      session.runningAt = null;
+    } else {
+      session.runningAt = Date.now();
+    }
+    await this.saveSettings();
+    await this.refreshFocusStatus();
+  }
+
+  async restoreFocusTimer(): Promise<void> {
+    const session = this.pluginSettings.activeFocus;
+    if (!session) return;
+    const file = this.app.vault.getAbstractFileByPath(session.filePath);
+    if (!(file instanceof TFile)) {
+      new Notice("找不到原计划笔记，无法完成回写 / The plan note is missing.");
+      return;
+    }
+    new FocusTimerModal(this.app, this).open();
+  }
+
+  async finishFocus(): Promise<void> {
+    const session = this.pluginSettings.activeFocus;
+    if (!session || this.finishingFocus) return;
+    this.finishingFocus = true;
+    try {
+      if (session.runningAt !== null) {
+        session.focusedMs += Math.max(0, Date.now() - session.runningAt);
+        session.runningAt = null;
+        await this.saveSettings();
+      }
+      const file = this.app.vault.getAbstractFileByPath(session.filePath);
+      if (!(file instanceof TFile)) {
+        new Notice("找不到原计划笔记，专注记录暂未写入 / Plan note missing; focus record was kept.");
+        return;
+      }
+      const actualMinutes = Math.max(1, Math.round(session.focusedMs / 60000));
+      await this.app.fileManager.processFrontMatter(file, fm => {
+        fm[`${session.taskId}ActualStart`] ??= timeOfDay(new Date(session.startedAt));
+        fm[`${session.taskId}ActualEnd`] = timeOfDay(new Date());
+        fm[`${session.taskId}ActualMinutes`] = Number(fm[`${session.taskId}ActualMinutes`] ?? 0) + actualMinutes;
+        fm[`${session.taskId}FocusSessions`] = Number(fm[`${session.taskId}FocusSessions`] ?? 0) + 1;
+      });
+      this.pluginSettings.activeFocus = undefined;
+      await this.saveSettings();
+      new Notice(`已记录 ${actualMinutes} 分钟专注 / Focus recorded.`);
+    } finally {
+      this.finishingFocus = false;
+      await this.refreshFocusStatus();
+    }
+  }
+
+  async refreshFocusStatus(): Promise<void> {
+    const session = this.pluginSettings.activeFocus;
+    if (!session) {
+      this.focusStatusEl.style.display = "none";
+      return;
+    }
+    this.focusStatusEl.style.display = "";
+    const elapsed = session.focusedMs + (session.runningAt === null ? 0 : Math.max(0, Date.now() - session.runningAt));
+    if (session.runningAt !== null && elapsed >= session.durationMs) {
+      this.focusStatusEl.setText(`Focus complete · ${session.taskName}`);
+      void this.finishFocus();
+      return;
+    }
+    const state = session.runningAt === null ? "Focus paused" : formatDuration(Math.max(0, session.durationMs - elapsed));
+    this.focusStatusEl.setText(`${state} · ${session.taskName}`);
+    this.focusStatusEl.setAttribute("aria-label", "Restore focus timer");
   }
 
   async generatePlan(mode: PlanMode, date: string, startTime: string, endTime: string, input: string): Promise<PlanResult> {
@@ -220,56 +341,43 @@ class FocusTaskPickerModal extends Modal {
     for (const task of this.tasks) {
       const button = this.contentEl.createEl("button", { cls: "ai-planner-focus-task" });
       button.setText(`${task.category ? `${task.category} · ` : ""}${task.name} (${task.estimatedMinutes || "?"} min)`);
-      button.addEventListener("click", () => { this.close(); new FocusTimerModal(this.app, this.file, task, this.minutes).open(); });
+      button.addEventListener("click", () => { this.close(); void this.plugin.startFocus(this.file, task, this.minutes); });
     }
   }
 }
 
 class FocusTimerModal extends Modal {
-  private focusedMs = 0;
-  private runningAt: number | null = Date.now();
   private interval: number | null = null;
-  private readonly startedAt = new Date();
-  private readonly durationMs: number;
-  constructor(app: App, private readonly file: TFile, private readonly task: FocusTask, minutes: number) { super(app); this.durationMs = minutes * 60000; }
+  constructor(app: App, private readonly plugin: AIPlannerPlugin) { super(app); }
+
   onOpen(): void {
+    const session = this.plugin.getActiveFocus();
+    if (!session) { this.close(); return; }
     this.modalEl.addClass("ai-planner-modal", "ai-planner-focus-timer");
     this.titleEl.setText("专注中 / Focusing");
-    this.contentEl.createEl("p", { text: this.task.name, cls: "ai-planner-focus-title" });
+    this.contentEl.createEl("p", { text: session.taskName, cls: "ai-planner-focus-title" });
     const clock = this.contentEl.createEl("div", { cls: "ai-planner-focus-clock" });
+    this.contentEl.createEl("p", {
+      text: "关闭此窗口只会最小化，计时会保留。手机切换到其它 App 后按经过的墙上时间估算；iOS 可能暂停或回收 Obsidian，因此这不代表已验证的专注或阅读时长。 / Closing only minimizes this timer. Mobile background time is a wall-clock estimate; iOS may suspend or terminate Obsidian, so it is not verified focus or reading time.",
+      cls: "ai-planner-focus-disclaimer"
+    });
     const action = this.contentEl.createDiv({ cls: "modal-button-container" });
     const pause = action.createEl("button", { text: "暂停 / Pause" });
     const finish = action.createEl("button", { text: "结束 / Finish", cls: "mod-cta" });
     const refresh = (): void => {
-      const elapsed = this.focusedMs + (this.runningAt ? Date.now() - this.runningAt : 0);
-      const remaining = Math.max(0, this.durationMs - elapsed);
+      const current = this.plugin.getActiveFocus();
+      if (!current) { this.close(); return; }
+      const elapsed = current.focusedMs + (current.runningAt === null ? 0 : Math.max(0, Date.now() - current.runningAt));
+      const remaining = Math.max(0, current.durationMs - elapsed);
       clock.setText(formatDuration(remaining));
-      if (remaining <= 0) void this.finish();
+      pause.setText(current.runningAt === null ? "继续 / Resume" : "暂停 / Pause");
+      if (remaining <= 0) void this.plugin.finishFocus();
     };
-    pause.addEventListener("click", () => {
-      if (this.runningAt) { this.focusedMs += Date.now() - this.runningAt; this.runningAt = null; pause.setText("继续 / Resume"); }
-      else { this.runningAt = Date.now(); pause.setText("暂停 / Pause"); }
-      refresh();
-    });
-    finish.addEventListener("click", () => void this.finish());
+    pause.addEventListener("click", () => void this.plugin.toggleFocusPause().then(refresh));
+    finish.addEventListener("click", () => void this.plugin.finishFocus().then(() => this.close()));
     this.interval = window.setInterval(refresh, 500); refresh();
   }
   onClose(): void { if (this.interval !== null) window.clearInterval(this.interval); }
-  private async finish(): Promise<void> {
-    if (this.interval === null) return;
-    if (this.runningAt) { this.focusedMs += Date.now() - this.runningAt; this.runningAt = null; }
-    window.clearInterval(this.interval); this.interval = null;
-    const actualMinutes = Math.max(1, Math.round(this.focusedMs / 60000));
-    const end = new Date();
-    await this.app.fileManager.processFrontMatter(this.file, fm => {
-      fm[`${this.task.id}ActualStart`] ??= timeOfDay(this.startedAt);
-      fm[`${this.task.id}ActualEnd`] = timeOfDay(end);
-      fm[`${this.task.id}ActualMinutes`] = Number(fm[`${this.task.id}ActualMinutes`] ?? 0) + actualMinutes;
-      fm[`${this.task.id}FocusSessions`] = Number(fm[`${this.task.id}FocusSessions`] ?? 0) + 1;
-    });
-    new Notice(`已记录 ${actualMinutes} 分钟专注 / Focus recorded.`);
-    this.close();
-  }
 }
 
 class PlanInputModal extends Modal {

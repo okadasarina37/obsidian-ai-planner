@@ -56,7 +56,13 @@ An open-source Obsidian plugin for creating practical study and work plans with 
 
 ### 专注与时间校准
 
-在生成后的计划笔记中运行命令 `AI Planner: Start focus session`，选择任务和时长。结束专注后，插件会回写任务的实际时间和累计专注分钟数。
+在生成后的计划笔记中运行命令 `AI Planner: Start focus session`，选择任务和时长。关闭专注窗口只会最小化，不会结束会话；可点击 Obsidian 底部状态栏中的专注计时恢复窗口。插件重启后也会从保存的开始时间和累计时长恢复会话。结束专注后，插件会回写任务的实际时间和累计专注分钟数。
+
+#### 后台与系统限制
+
+- 桌面版最小化 Obsidian 后，计时会按经过时间继续计算。
+- 手机切换到其它 App 后，恢复时显示的是经过的**墙上时间估算**，不是已验证的专注或阅读时长。
+- iPhone/iPad 的 iOS 可能暂停或回收后台的 Obsidian。插件会保留已保存的会话并在返回后尝试恢复，但无法保证后台脚本持续运行，也无法确认外部电子书 App 中的实际阅读行为。
 
 新计划会读取设置中“历史校准天数”范围内的同目录计划。每个任务分类至少积累两条有效的预计/实际时长后，才会调整后续估时，避免少量偶然记录影响安排。
 
@@ -87,6 +93,14 @@ Alternatively, download `main.js`, `manifest.json`, and `styles.css` from the la
 ### Use
 
 Run `AI Planner: Create AI plan` from the command palette. Configure a provider, choose a mode, provide source content, review the generated plan, and write it to your vault. Open a generated plan and run `AI Planner: Start focus session` to record focused time.
+
+### Background and system limits
+
+Closing the focus window minimizes it without ending the session. Click the focus item in Obsidian's status bar to reopen it. The session is saved and can be restored after Obsidian restarts.
+
+- On desktop, minimizing Obsidian continues the timer based on elapsed time.
+- On mobile, time shown after switching to another app is a **wall-clock estimate**, not verified focus or reading time.
+- iOS may suspend or terminate Obsidian in the background. The plugin restores saved session data when possible, but cannot guarantee background execution or verify reading performed in an external ebook app.
 
 ## Development
 
