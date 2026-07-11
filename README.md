@@ -56,7 +56,7 @@ An open-source Obsidian plugin for creating practical study and work plans with 
 
 ### 专注与时间校准
 
-在生成后的计划笔记中运行命令 `AI Planner: Start focus session`，选择任务和时长。关闭专注窗口只会最小化，不会结束会话；可点击 Obsidian 底部状态栏中的专注计时恢复窗口。插件重启后也会从保存的开始时间和累计时长恢复会话。结束专注后，插件会回写任务的实际时间和累计专注分钟数。
+在生成后的计划笔记中运行命令 `AI Planner: Start focus session`，选择任务和时长。开始时会立即写入任务的实际开始时间。关闭专注窗口只会最小化，不会结束会话；点击右下角悬浮迷你计时条可恢复窗口，桌面端也可点击底部状态栏。插件重启后会从保存的开始时间和累计时长恢复会话。结束专注后，插件会回写结束时间和累计专注分钟数。
 
 #### 后台与系统限制
 
@@ -96,7 +96,7 @@ Run `AI Planner: Create AI plan` from the command palette. Configure a provider,
 
 ### Background and system limits
 
-Closing the focus window minimizes it without ending the session. Click the focus item in Obsidian's status bar to reopen it. The session is saved and can be restored after Obsidian restarts.
+Starting a focus session writes the actual start time immediately. Closing the focus window minimizes it without ending the session. Click the floating mini timer in the lower-right corner to reopen it; on desktop, the status-bar item also restores it. The session is saved and can be restored after Obsidian restarts.
 
 - On desktop, minimizing Obsidian continues the timer based on elapsed time.
 - On mobile, time shown after switching to another app is a **wall-clock estimate**, not verified focus or reading time.

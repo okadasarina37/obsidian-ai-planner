@@ -118,6 +118,7 @@ function completionText(provider: ProviderId, response: unknown): string | undef
 export default class AIPlannerPlugin extends Plugin {
   pluginSettings!: PlannerSettings;
   private focusStatusEl!: HTMLElement;
+  private focusMiniEl!: HTMLButtonElement;
   private finishingFocus = false;
 
   async onload(): Promise<void> {
@@ -129,11 +130,18 @@ export default class AIPlannerPlugin extends Plugin {
       callback: () => new PlanInputModal(this.app, this).open()
     });
     this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
+    this.addCommand({ id: "resume-focus-session", name: "Resume focus session", callback: () => this.restoreFocusTimer() });
     this.addRibbonIcon("calendar-plus", "Create AI plan", () => new PlanInputModal(this.app, this).open());
     this.addRibbonIcon("timer", "Start focus session", () => this.openFocusForActiveNote());
     this.focusStatusEl = this.addStatusBarItem();
     this.focusStatusEl.addClass("ai-planner-focus-status");
     this.registerDomEvent(this.focusStatusEl, "click", () => void this.restoreFocusTimer());
+    this.focusMiniEl = this.app.workspace.containerEl.createEl("button", {
+      cls: "ai-planner-focus-mini",
+      attr: { type: "button", "aria-label": "Restore focus timer" }
+    });
+    this.registerDomEvent(this.focusMiniEl, "click", () => void this.restoreFocusTimer());
+    this.register(() => this.focusMiniEl.remove());
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
     await this.refreshFocusStatus();
   }
@@ -164,6 +172,7 @@ export default class AIPlannerPlugin extends Plugin {
       await this.restoreFocusTimer();
       return;
     }
+    const startedAt = Date.now();
     this.pluginSettings.activeFocus = {
       filePath: file.path,
       taskId: task.id,
@@ -171,10 +180,17 @@ export default class AIPlannerPlugin extends Plugin {
       category: task.category,
       durationMs: Math.max(1, minutes) * 60000,
       focusedMs: 0,
-      runningAt: Date.now(),
-      startedAt: Date.now()
+      runningAt: startedAt,
+      startedAt
     };
     await this.saveSettings();
+    try {
+      await this.app.fileManager.processFrontMatter(file, fm => {
+        fm[`${task.id}ActualStart`] ??= timeOfDay(new Date(startedAt));
+      });
+    } catch {
+      new Notice("无法立即写入开始时间，将在结束时重试 / Could not write the start time yet; it will retry on finish.");
+    }
     await this.refreshFocusStatus();
     new FocusTimerModal(this.app, this).open();
   }
@@ -238,17 +254,21 @@ export default class AIPlannerPlugin extends Plugin {
     const session = this.pluginSettings.activeFocus;
     if (!session) {
       this.focusStatusEl.style.display = "none";
+      this.focusMiniEl.style.display = "none";
       return;
     }
     this.focusStatusEl.style.display = "";
+    this.focusMiniEl.style.display = "";
     const elapsed = session.focusedMs + (session.runningAt === null ? 0 : Math.max(0, Date.now() - session.runningAt));
     if (session.runningAt !== null && elapsed >= session.durationMs) {
       this.focusStatusEl.setText(`Focus complete · ${session.taskName}`);
+      this.focusMiniEl.setText("专注完成 / Focus complete");
       void this.finishFocus();
       return;
     }
     const state = session.runningAt === null ? "Focus paused" : formatDuration(Math.max(0, session.durationMs - elapsed));
     this.focusStatusEl.setText(`${state} · ${session.taskName}`);
+    this.focusMiniEl.setText(`${state} · ${session.taskName}`);
     this.focusStatusEl.setAttribute("aria-label", "Restore focus timer");
   }
 
