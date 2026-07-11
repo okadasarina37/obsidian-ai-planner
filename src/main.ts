@@ -173,14 +173,29 @@ export default class AIPlannerPlugin extends Plugin {
       if (!target.closest(".ai-planner-modal")) return;
       this.keepFocusedInputVisible(target);
     });
+    this.registerDomEvent(document, "focusout", event => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const modal = target.closest(".ai-planner-modal") as HTMLElement | null;
+      if (!modal) return;
+      window.setTimeout(() => {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active.closest(".ai-planner-modal") === modal) return;
+        modal.removeClass("ai-planner-keyboard-active");
+        modal.style.removeProperty("--ai-planner-keyboard-shift");
+      }, 180);
+    });
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
     await this.refreshFocusStatus();
   }
 
   private keepFocusedInputVisible(target: HTMLElement): void {
     const content = target.closest(".modal-content") as HTMLElement | null;
-    if (!content) return;
-    const scroll = (): void => {
+    const modal = target.closest(".ai-planner-modal") as HTMLElement | null;
+    if (!content || !modal) return;
+    modal.removeClass("ai-planner-keyboard-active");
+    modal.style.removeProperty("--ai-planner-keyboard-shift");
+    const move = (): void => {
       const viewportHeight = Math.min(window.visualViewport?.height ?? window.innerHeight, window.innerHeight);
       const targetRect = target.getBoundingClientRect();
       const contentRect = content.getBoundingClientRect();
@@ -188,9 +203,22 @@ export default class AIPlannerPlugin extends Plugin {
       const bottomLimit = Math.min(contentRect.bottom - 16, viewportHeight - 24);
       if (targetRect.bottom > bottomLimit) content.scrollTop += targetRect.bottom - bottomLimit;
       else if (targetRect.top < topLimit) content.scrollTop -= topLimit - targetRect.top;
+
+      if (window.innerWidth > 600) return;
+      // Some iOS WebViews keep reporting the full layout viewport above the keyboard.
+      const reportedHeight = window.visualViewport?.height ?? window.innerHeight;
+      const keyboardTop = reportedHeight < window.innerHeight * 0.88 ? reportedHeight : window.innerHeight * 0.58;
+      const updatedRect = target.getBoundingClientRect();
+      const safeBottom = keyboardTop - 24;
+      if (updatedRect.bottom > safeBottom) {
+        const shift = Math.min(Math.max(0, updatedRect.top - Math.max(48, keyboardTop * 0.2)), window.innerHeight * 0.6);
+        if (shift > 0) {
+          modal.style.setProperty("--ai-planner-keyboard-shift", `${Math.round(shift)}px`);
+          modal.addClass("ai-planner-keyboard-active");
+        }
+      }
     };
-    // iOS reports the final keyboard viewport after the focus event, not before it.
-    for (const delay of [0, 180, 420, 750]) window.setTimeout(scroll, delay);
+    for (const delay of [0, 180, 420, 750]) window.setTimeout(move, delay);
   }
 
   async saveSettings(): Promise<void> {

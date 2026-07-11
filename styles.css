@@ -99,6 +99,10 @@
 }
 
 @media (max-width: 600px) {
+  .ai-planner-modal.ai-planner-keyboard-active {
+    transform: translateY(calc(-1 * var(--ai-planner-keyboard-shift, 0px))) !important;
+  }
+
   .ai-planner-focus-mini {
     bottom: max(4rem, calc(env(safe-area-inset-bottom) + 1rem));
   }
