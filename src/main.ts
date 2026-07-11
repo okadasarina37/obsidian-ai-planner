@@ -1,8 +1,10 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
+import { App, ItemView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, normalizePath, requestUrl } from "obsidian";
 
 type PlanMode = "study" | "work";
 type ProviderId = "custom" | "openai" | "claude" | "deepseek" | "glm" | "kimi" | "gemini";
 type InterfaceLanguage = "auto" | "zh" | "en";
+
+const MOBILE_PLAN_EDITOR_VIEW = "ai-planner-mobile-editor";
 
 interface PlannerSettings {
   provider: ProviderId;
@@ -135,11 +137,11 @@ export default class AIPlannerPlugin extends Plugin {
     this.addCommand({
       id: "create-ai-plan",
       name: "Create AI plan",
-      callback: () => new PlanInputModal(this.app, this).open()
+      callback: () => void this.openPlanEditor()
     });
     this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
     this.addCommand({ id: "resume-focus-session", name: "Resume focus session", callback: () => this.restoreFocusTimer() });
-    this.addRibbonIcon("calendar-plus", "Create AI plan", () => new PlanInputModal(this.app, this).open());
+    this.addRibbonIcon("calendar-plus", "Create AI plan", () => void this.openPlanEditor());
     this.addRibbonIcon("timer", "Start focus session", () => this.openFocusForActiveNote());
     this.focusStatusEl = this.addStatusBarItem();
     this.focusStatusEl.addClass("ai-planner-focus-status");
@@ -174,7 +176,19 @@ export default class AIPlannerPlugin extends Plugin {
       this.keepFocusedInputVisible(target);
     });
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
+    this.registerView(MOBILE_PLAN_EDITOR_VIEW, leaf => new MobilePlanEditorView(leaf, this));
     await this.refreshFocusStatus();
+  }
+
+  async openPlanEditor(): Promise<void> {
+    if (!Platform.isMobile) {
+      new PlanInputModal(this.app, this).open();
+      return;
+    }
+    const existing = this.app.workspace.getLeavesOfType(MOBILE_PLAN_EDITOR_VIEW)[0];
+    const leaf = existing ?? this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: MOBILE_PLAN_EDITOR_VIEW, active: true });
+    this.app.workspace.revealLeaf(leaf);
   }
 
   private keepFocusedInputVisible(target: HTMLElement): void {
@@ -502,6 +516,96 @@ class FocusTimerModal extends Modal {
   onClose(): void {
     if (this.interval !== null) window.clearInterval(this.interval);
     this.plugin.setFocusTimerOpen(false);
+  }
+}
+
+class MobilePlanEditorView extends ItemView {
+  private mode: PlanMode = "study";
+  private date = localDate();
+  private startTime = "";
+  private endTime = "";
+  private input = "";
+
+  constructor(leaf: WorkspaceLeaf, private readonly plugin: AIPlannerPlugin) { super(leaf); }
+
+  getViewType(): string { return MOBILE_PLAN_EDITOR_VIEW; }
+  getDisplayText(): string { return "AI Planner"; }
+  getIcon(): string { return "calendar-plus"; }
+
+  async onOpen(): Promise<void> { this.render(); }
+
+  private render(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("ai-planner-mobile-editor");
+    this.contentEl.createEl("h1", { text: "AI Planner / AI 计划" });
+
+    const form = this.contentEl.createDiv({ cls: "ai-planner-mobile-form" });
+    const mode = this.field(form, "模式 / Mode").createEl("select");
+    mode.createEl("option", { value: "study", text: "作业与学习 / Homework & study" });
+    mode.createEl("option", { value: "work", text: "工作 / Work" });
+    mode.value = this.mode;
+    mode.addEventListener("change", () => this.mode = mode.value as PlanMode);
+
+    const date = this.field(form, "计划日期 / Plan date").createEl("input", { type: "date" });
+    date.value = this.date;
+    date.addEventListener("input", () => this.date = date.value);
+
+    const start = this.field(form, "开始时间 / Start time", "可选 / Optional.").createEl("input", { type: "time" });
+    start.value = this.startTime;
+    start.addEventListener("input", () => this.startTime = start.value);
+
+    const end = this.field(form, "最晚结束 / Latest finish", "可选 / Optional.").createEl("input", { type: "time" });
+    end.value = this.endTime;
+    end.addEventListener("input", () => this.endTime = end.value);
+
+    this.field(form, "任务或作业 / Tasks or homework", "填写科目/项目、任务量、截止时间和限制条件。");
+    const sourceBar = form.createDiv({ cls: "ai-planner-source" });
+    const sourceLabel = sourceBar.createSpan({ text: "来源 / Source: 手动输入 / manual input" });
+    const useActive = sourceBar.createEl("button", { text: "使用当前笔记 / Use current note" });
+    const choose = sourceBar.createEl("button", { text: "选择 Markdown 笔记 / Choose note" });
+    const area = form.createEl("textarea", { cls: "ai-planner-input" });
+    area.rows = 9;
+    area.value = this.input;
+    area.placeholder = "Example: Math workbook pages 12-14; memorize 20 English words; Chinese reading aloud.";
+    area.addEventListener("input", () => this.input = area.value);
+    const loadSource = async (file: TFile): Promise<void> => {
+      const content = await this.app.vault.read(file);
+      this.input = content;
+      area.value = content;
+      sourceLabel.setText(`来源 / Source: ${file.path}`);
+    };
+    useActive.addEventListener("click", async () => {
+      const file = this.app.workspace.getActiveFile();
+      if (!file || file.extension !== "md") return new Notice("请先打开一个 Markdown 笔记 / Open a Markdown note first.");
+      try { await loadSource(file); } catch { new Notice("Could not read the current note."); }
+    });
+    choose.addEventListener("click", () => new MarkdownFilePickerModal(this.app, async file => {
+      try { await loadSource(file); } catch { new Notice("Could not read that note."); }
+    }).open());
+
+    const action = this.contentEl.createDiv({ cls: "ai-planner-mobile-actions" });
+    const generate = action.createEl("button", { text: "生成预览 / Generate preview", cls: "mod-cta" });
+    generate.addEventListener("click", async () => {
+      if (!this.input.trim()) return new Notice("请至少填写一项任务 / Enter at least one task first.");
+      generate.disabled = true;
+      generate.setText("正在生成 / Generating...");
+      area.blur();
+      try {
+        const plan = await this.plugin.generatePlan(this.mode, this.date, this.startTime, this.endTime, this.input);
+        new PlanPreviewModal(this.app, this.plugin, this.mode, this.date, plan).open();
+      } catch (error) {
+        new Notice(error instanceof Error ? error.message : "Could not generate plan.");
+        generate.disabled = false;
+        generate.setText("生成预览 / Generate preview");
+      }
+    });
+  }
+
+  private field(parent: HTMLElement, label: string, description?: string): HTMLElement {
+    const field = parent.createDiv({ cls: "ai-planner-mobile-field" });
+    field.createEl("label", { text: label });
+    if (description) field.createEl("small", { text: description });
+    return field;
   }
 }
 
