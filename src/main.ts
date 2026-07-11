@@ -604,18 +604,10 @@ class MobilePlanEditorView extends ItemView {
   }
 
   private createMobileTimeInput(parent: HTMLElement, value: string, onChange: (value: string) => void): HTMLInputElement {
-    const input = parent.createEl("input", { cls: "ai-planner-mobile-time", placeholder: "HH:mm" });
-    input.type = "text";
-    input.inputMode = "numeric";
-    input.autocomplete = "off";
-    input.maxLength = 5;
+    const input = parent.createEl("input", { cls: "ai-planner-mobile-time", type: "time" });
+    input.step = "60";
     input.value = value;
     input.addEventListener("input", () => onChange(input.value));
-    input.addEventListener("blur", () => {
-      const digits = input.value.replace(/\D/g, "");
-      if (/^\d{4}$/.test(digits)) input.value = `${digits.slice(0, 2)}:${digits.slice(2)}`;
-      onChange(input.value);
-    });
     return input;
   }
 }
