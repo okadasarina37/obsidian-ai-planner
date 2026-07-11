@@ -16,6 +16,8 @@ An open-source Obsidian plugin for creating practical study and work plans with 
 - Claude 与 Gemini 使用原生 API；DeepSeek、GLM、Kimi 使用兼容的 `chat/completions` API。
 - 专注模式：从当前计划笔记中选择任务，支持 25/50/90 分钟或自定义时长，暂停、继续和结束。
 - 专注结束后自动写入实际开始/结束、累计专注分钟数和专注次数。
+- 可新建手动计划，或向当前计划追加任务，无需编辑 YAML。
+- 自动执行总结基于任务字段、勾选状态和专注记录计算任务数、完成数、预计/实际时间、偏差和分类分配。
 - 历史时间校准：生成计划时读取近期记录，按任务分类比较预计/实际时长；同类至少两条有效记录才用于调整新任务时长和缓冲。
 
 ### 安装
@@ -54,6 +56,10 @@ An open-source Obsidian plugin for creating practical study and work plans with 
 4. 点击“生成预览 / Generate preview”，检查任务、时段和预计分钟数。
 5. 点击“写入计划 / Write plan”。计划会写入设置中的学习或工作目录。
 
+### 手动计划与总结
+
+命令面板还提供 `AI Planner: Create manual plan`、`AI Planner: Add task to current plan` 和 `AI Planner: Refresh current plan summary`。手动任务与 AI 任务使用同一数据格式；追加任务或新建计划后会自动更新总结。总结只使用笔记中已记录的数据，不把 AI 推测当作执行事实。
+
 ### 专注与时间校准
 
 在生成后的计划笔记中运行命令 `AI Planner: Start focus session`，选择任务和时长。开始时会立即写入任务的实际开始时间。关闭专注窗口只会最小化，不会结束会话；大号倒计时打开时悬浮条会自动隐藏。关闭后可点击右下角悬浮迷你计时条恢复窗口，也可拖动它到任意位置，位置会保存；桌面端还可点击底部状态栏。插件重启后会从保存的开始时间和累计时长恢复会话。结束专注后，插件会回写结束时间和累计专注分钟数。
@@ -78,6 +84,8 @@ An open-source Obsidian plugin for creating practical study and work plans with 
 - Native Claude Messages and Gemini GenerateContent adapters.
 - Focus sessions with task selection, 25/50/90-minute presets, custom duration, pause, resume, and finish.
 - Focus sessions write actual time and focused minutes back to the plan.
+- Create manual plans or append tasks to the current plan without editing YAML.
+- Automatic execution summaries calculate task count, completion, planned/actual time, variance, and category allocation from recorded plan data.
 - Historical calibration improves future estimates from recent planned versus actual time records.
 
 ### Install
@@ -93,6 +101,8 @@ Alternatively, download `main.js`, `manifest.json`, and `styles.css` from the la
 ### Use
 
 Run `AI Planner: Create AI plan` from the command palette. Configure a provider, choose a mode, provide source content, review the generated plan, and write it to your vault. Open a generated plan and run `AI Planner: Start focus session` to record focused time.
+
+Use `Create manual plan`, `Add task to current plan`, and `Refresh current plan summary` from the command palette to manage plans without editing YAML. Summaries use recorded plan data only and do not present AI guesses as execution facts.
 
 ### Background and system limits
 

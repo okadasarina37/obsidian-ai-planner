@@ -141,6 +141,9 @@ export default class AIPlannerPlugin extends Plugin {
     });
     this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
     this.addCommand({ id: "resume-focus-session", name: "Resume focus session", callback: () => this.restoreFocusTimer() });
+    this.addCommand({ id: "create-manual-plan", name: "Create manual plan", callback: () => new ManualTaskModal(this.app, this).open() });
+    this.addCommand({ id: "add-task-to-current-plan", name: "Add task to current plan", callback: () => this.openManualTaskForActiveNote() });
+    this.addCommand({ id: "refresh-plan-summary", name: "Refresh current plan summary", callback: () => void this.refreshPlanSummaryForActiveNote() });
     this.addRibbonIcon("calendar-plus", "Create AI plan", () => void this.openPlanEditor());
     this.addRibbonIcon("timer", "Start focus session", () => this.openFocusForActiveNote());
     this.focusStatusEl = this.addStatusBarItem();
@@ -280,6 +283,67 @@ export default class AIPlannerPlugin extends Plugin {
     new FocusTaskPickerModal(this.app, this, file, tasks).open();
   }
 
+  openManualTaskForActiveNote(): void {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) { new Notice("请先打开一个计划笔记 / Open a plan note first."); return; }
+    new ManualTaskModal(this.app, this, file).open();
+  }
+
+  async addManualTask(file: TFile | undefined, task: PlanTask, mode: PlanMode, date: string, planTitle: string): Promise<void> {
+    if (!file) {
+      await this.writePlan(mode, date, { title: planTitle || (mode === "study" ? "手动学习计划" : "手动工作计划"), summary: "手动建立。插件会根据任务记录自动更新执行总结。", tasks: [task], reviewTasks: [] });
+      return;
+    }
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+    const ids = Object.keys(fm).filter(key => /^task\d+Name$/.test(key)).map(key => Number(key.match(/^task(\d+)Name$/)?.[1] ?? 0));
+    const number = Math.max(0, ...ids) + 1;
+    const id = `task${String(number).padStart(2, "0")}`;
+    await this.app.fileManager.processFrontMatter(file, frontmatter => {
+      frontmatter[`${id}Name`] = task.title;
+      frontmatter[`${id}Category`] = task.category || "其它";
+      frontmatter[`${id}EstimatedMinutes`] = task.estimatedMinutes;
+      frontmatter[`${id}ActualStart`] = "";
+      frontmatter[`${id}ActualEnd`] = "";
+      frontmatter[`${id}ActualMinutes`] = 0;
+      frontmatter[`${id}FocusSessions`] = 0;
+    });
+    const content = await this.app.vault.read(file);
+    const section = "## 手动补充";
+    const card = renderTask(task, String(fm.planDate ?? localDate()), number);
+    await this.app.vault.modify(file, content.includes(section) ? `${content.trimEnd()}\n\n${card}\n` : `${content.trimEnd()}\n\n${section}\n\n${card}\n`);
+    await this.refreshPlanSummary(file);
+    new Notice("已添加任务并更新总结 / Task added and summary updated.");
+  }
+
+  async refreshPlanSummaryForActiveNote(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) { new Notice("请先打开一个计划笔记 / Open a plan note first."); return; }
+    await this.refreshPlanSummary(file);
+    new Notice("已刷新计划总结 / Plan summary refreshed.");
+  }
+
+  async refreshPlanSummary(file: TFile): Promise<void> {
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+    const taskKeys = Object.keys(fm).filter(key => /^task\d+Name$/.test(key));
+    if (!taskKeys.length) { new Notice("当前笔记没有 AI Planner 任务字段 / No AI Planner tasks found."); return; }
+    const content = await this.app.vault.read(file);
+    const tasks = taskKeys.map(key => {
+      const id = key.replace("Name", "");
+      return { category: String(fm[`${id}Category`] ?? "其它"), planned: Number(fm[`${id}EstimatedMinutes`] ?? 0), actual: Number(fm[`${id}ActualMinutes`] ?? 0) || durationFromTimes(fm[`${id}ActualStart`], fm[`${id}ActualEnd`]), sessions: Number(fm[`${id}FocusSessions`] ?? 0) };
+    });
+    const planned = tasks.reduce((sum, task) => sum + task.planned, 0);
+    const actual = tasks.reduce((sum, task) => sum + task.actual, 0);
+    const sessions = tasks.reduce((sum, task) => sum + task.sessions, 0);
+    const completed = (content.match(/^- \[x\].*#计划/im) ?? []).length;
+    const categories = new Map<string, number>();
+    for (const task of tasks) categories.set(task.category, (categories.get(task.category) ?? 0) + task.planned);
+    const allocation = [...categories.entries()].map(([name, minutes]) => `${name} ${minutes} 分钟`).join("；") || "暂无";
+    const variance = actual > 0 ? `${actual >= planned ? "+" : ""}${actual - planned} 分钟` : "待记录";
+    const summary = `<!-- AI-PLANNER-SUMMARY:START -->\n> [!summary] 执行总结 / Execution summary\n> - 任务：${tasks.length} 项；已勾选：${Math.min(completed, tasks.length)} 项；专注次数：${sessions} 次。\n> - 时间：预计 ${planned} 分钟；已记录实际 ${actual || "待记录"}${actual ? " 分钟" : ""}；偏差：${variance}。\n> - 分类预计分配：${allocation}。\n> - 说明：以上仅基于任务字段、勾选状态和专注记录计算。\n<!-- AI-PLANNER-SUMMARY:END -->`;
+    const pattern = /<!-- AI-PLANNER-SUMMARY:START -->[\s\S]*?<!-- AI-PLANNER-SUMMARY:END -->/;
+    await this.app.vault.modify(file, pattern.test(content) ? content.replace(pattern, summary) : `${content.trimEnd()}\n\n${summary}\n`);
+  }
+
   async startFocus(file: TFile, task: FocusTask, minutes: number): Promise<void> {
     if (this.pluginSettings.activeFocus) {
       new Notice("已有进行中的专注 / A focus session is already active.");
@@ -417,8 +481,9 @@ export default class AIPlannerPlugin extends Plugin {
     const path = normalizePath(`${folder}/${filename}`);
     const content = renderPlan(mode, date, plan);
     const existing = this.app.vault.getAbstractFileByPath(path);
+    const file = existing instanceof TFile ? existing : await this.app.vault.create(path, content);
     if (existing instanceof TFile) await this.app.vault.modify(existing, content);
-    else await this.app.vault.create(path, content);
+    await this.refreshPlanSummary(file);
     await this.app.workspace.openLinkText(path, "", true);
     return path;
   }
@@ -609,6 +674,47 @@ class MobilePlanEditorView extends ItemView {
     input.value = value;
     input.addEventListener("input", () => onChange(input.value));
     return input;
+  }
+}
+
+class ManualTaskModal extends Modal {
+  private mode: PlanMode = "study";
+  private date = localDate();
+  private planTitle = "";
+  private title = "";
+  private category = "";
+  private minutes = 30;
+  private startTime = "";
+  private endTime = "";
+
+  constructor(app: App, private readonly plugin: AIPlannerPlugin, private readonly file?: TFile) { super(app); }
+
+  onOpen(): void {
+    this.modalEl.addClass("ai-planner-modal");
+    this.titleEl.setText(this.file ? "添加计划任务 / Add task" : "新建手动计划 / Create manual plan");
+    if (!this.file) {
+      new Setting(this.contentEl).setName("模式 / Mode").addDropdown(dropdown => dropdown.addOption("study", "作业与学习 / Homework & study").addOption("work", "工作 / Work").setValue(this.mode).onChange(value => this.mode = value as PlanMode));
+      new Setting(this.contentEl).setName("计划日期 / Plan date").addText(input => input.setValue(this.date).onChange(value => this.date = value));
+      new Setting(this.contentEl).setName("计划标题 / Plan title").addText(input => input.setValue(this.planTitle).onChange(value => this.planTitle = value));
+    }
+    new Setting(this.contentEl).setName("任务 / Task").addText(input => input.setValue(this.title).onChange(value => this.title = value));
+    new Setting(this.contentEl).setName("分类 / Category").addText(input => input.setValue(this.category).setPlaceholder("数学 / Project").onChange(value => this.category = value));
+    new Setting(this.contentEl).setName("预计分钟 / Estimated minutes").addText(input => input.setValue(String(this.minutes)).onChange(value => this.minutes = Math.max(1, Number(value) || 30)));
+    new Setting(this.contentEl).setName("开始时间 / Start time").addText(input => input.setValue(this.startTime).setPlaceholder("19:00").onChange(value => this.startTime = value));
+    new Setting(this.contentEl).setName("结束时间 / End time").addText(input => input.setValue(this.endTime).setPlaceholder("19:30").onChange(value => this.endTime = value));
+    const action = this.contentEl.createDiv({ cls: "modal-button-container" });
+    const submit = action.createEl("button", { text: this.file ? "添加任务 / Add task" : "创建计划 / Create plan", cls: "mod-cta" });
+    submit.addEventListener("click", async () => {
+      if (!this.title.trim()) return new Notice("请填写任务 / Enter a task first.");
+      submit.disabled = true;
+      try {
+        await this.plugin.addManualTask(this.file, { title: this.title.trim(), category: this.category.trim(), estimatedMinutes: this.minutes, startTime: this.startTime.trim(), endTime: this.endTime.trim() }, this.mode, this.date, this.planTitle.trim());
+        this.close();
+      } catch (error) {
+        new Notice(error instanceof Error ? error.message : "Could not save the task.");
+        submit.disabled = false;
+      }
+    });
   }
 }
 
@@ -805,7 +911,7 @@ function renderPlan(mode: PlanMode, date: string, plan: PlanResult): string {
     return [`${id}Name: ${yamlQuote(task.title)}`, `${id}Category: ${yamlQuote(task.category || "其它")}`, `${id}EstimatedMinutes: ${task.estimatedMinutes}`, `${id}ActualStart:`, `${id}ActualEnd:`, `${id}ActualMinutes: 0`, `${id}FocusSessions: 0`];
   });
   const taskCards = (label: string, tasks: PlanTask[], offset: number) => tasks.length ? `## ${label}\n\n${tasks.map((task, index) => renderTask(task, date, offset + index + 1)).join("\n\n")}` : `## ${label}\n\n暂无安排。`;
-  return `---\ntype: ${mode === "study" ? "每日作业计划" : "每日工作计划"}\nplanDate: ${date}\ntags:\n  - AI计划\n${frontmatter.join("\n")}\n---\n\n# ${plan.title}\n\n> [!abstract] 概览\n> ${plan.summary || "由 AI Planner 生成，执行后填写每项实际开始和完成时间。"}\n\n${taskCards(mode === "study" ? "作业计划表" : "工作计划表", plan.tasks, 0)}\n\n${mode === "study" ? taskCards("复习计划表", plan.reviewTasks ?? [], plan.tasks.length) : ""}\n`;
+  return `---\ntype: ${mode === "study" ? "每日作业计划" : "每日工作计划"}\nplanDate: ${date}\ntags:\n  - AI计划\n${frontmatter.join("\n")}\n---\n\n# ${plan.title}\n\n> [!abstract] 概览\n> ${plan.summary || "由 AI Planner 生成，执行后填写每项实际开始和完成时间。"}\n\n<!-- AI-PLANNER-SUMMARY:START -->\n> [!summary] 执行总结 / Execution summary\n> - 初始计划已创建；完成任务、专注或补充任务后运行“刷新当前计划总结”。\n<!-- AI-PLANNER-SUMMARY:END -->\n\n${taskCards(mode === "study" ? "作业计划表" : "工作计划表", plan.tasks, 0)}\n\n${mode === "study" ? taskCards("复习计划表", plan.reviewTasks ?? [], plan.tasks.length) : ""}\n`;
 }
 
 function renderTask(task: PlanTask, date: string, index: number): string {
