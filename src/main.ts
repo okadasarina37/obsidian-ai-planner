@@ -157,10 +157,11 @@ export default class AIPlannerPlugin extends Plugin {
     this.registerDomEvent(window, "pointerup", () => void this.endMiniDrag());
     this.register(() => this.focusMiniEl.remove());
     const updateVisibleHeight = (): void => {
-      const height = window.visualViewport?.height ?? window.innerHeight;
+      const height = Math.min(window.visualViewport?.height ?? window.innerHeight, window.innerHeight);
       document.documentElement.style.setProperty("--ai-planner-visible-height", `${Math.round(height)}px`);
     };
     updateVisibleHeight();
+    this.registerDomEvent(window, "resize", updateVisibleHeight);
     if (window.visualViewport) {
       const viewport = window.visualViewport;
       viewport.addEventListener("resize", updateVisibleHeight);
@@ -170,10 +171,26 @@ export default class AIPlannerPlugin extends Plugin {
       const target = event.target;
       if (!(target instanceof HTMLElement) || !target.matches("input, textarea, select")) return;
       if (!target.closest(".ai-planner-modal")) return;
-      window.setTimeout(() => target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }), 250);
+      this.keepFocusedInputVisible(target);
     });
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
     await this.refreshFocusStatus();
+  }
+
+  private keepFocusedInputVisible(target: HTMLElement): void {
+    const content = target.closest(".modal-content") as HTMLElement | null;
+    if (!content) return;
+    const scroll = (): void => {
+      const viewportHeight = Math.min(window.visualViewport?.height ?? window.innerHeight, window.innerHeight);
+      const targetRect = target.getBoundingClientRect();
+      const contentRect = content.getBoundingClientRect();
+      const topLimit = Math.max(contentRect.top + 16, 16);
+      const bottomLimit = Math.min(contentRect.bottom - 16, viewportHeight - 24);
+      if (targetRect.bottom > bottomLimit) content.scrollTop += targetRect.bottom - bottomLimit;
+      else if (targetRect.top < topLimit) content.scrollTop -= topLimit - targetRect.top;
+    };
+    // iOS reports the final keyboard viewport after the focus event, not before it.
+    for (const delay of [0, 180, 420, 750]) window.setTimeout(scroll, delay);
   }
 
   async saveSettings(): Promise<void> {

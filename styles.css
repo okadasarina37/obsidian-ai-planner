@@ -111,6 +111,7 @@
 
   .ai-planner-modal .modal-content {
     max-height: calc(var(--ai-planner-visible-height, 100dvh) - 9rem);
+    min-height: 0;
     padding-bottom: max(2rem, env(safe-area-inset-bottom));
   }
 
