@@ -115,6 +115,7 @@ class PlanInputModal extends Modal {
   constructor(app: App, private readonly plugin: AIPlannerPlugin) { super(app); }
 
   onOpen(): void {
+    this.modalEl.addClass("ai-planner-modal");
     this.titleEl.setText("AI Planner");
     new Setting(this.contentEl).setName("Mode").addDropdown(dropdown => dropdown
       .addOption("study", "Homework / study")
@@ -155,6 +156,7 @@ class PlanPreviewModal extends Modal {
   constructor(app: App, private readonly plugin: AIPlannerPlugin, private readonly mode: PlanMode, private readonly date: string, private readonly plan: PlanResult) { super(app); }
 
   onOpen(): void {
+    this.modalEl.addClass("ai-planner-modal");
     this.titleEl.setText(this.plan.title || "Plan preview");
     if (this.plan.summary) this.contentEl.createEl("p", { text: this.plan.summary });
     renderPreviewTasks(this.contentEl, "Plan", this.plan.tasks);
