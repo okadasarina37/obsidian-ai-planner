@@ -13,6 +13,8 @@ interface PlannerSettings {
   customHeaders: string;
   temperature: number;
   maxTokens: number;
+  historyDays: number;
+  focusMinutes: number;
   studyFolder: string;
   workFolder: string;
 }
@@ -42,6 +44,8 @@ const DEFAULT_SETTINGS: PlannerSettings = {
   customHeaders: "{}",
   temperature: 0.3,
   maxTokens: 1800,
+  historyDays: 14,
+  focusMinutes: 25,
   studyFolder: "06_Todo/学习",
   workFolder: "01_项目/工作计划"
 };
@@ -110,11 +114,21 @@ export default class AIPlannerPlugin extends Plugin {
       name: "Create AI plan",
       callback: () => new PlanInputModal(this.app, this).open()
     });
+    this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
     this.addRibbonIcon("calendar-plus", "Create AI plan", () => new PlanInputModal(this.app, this).open());
+    this.addRibbonIcon("timer", "Start focus session", () => this.openFocusForActiveNote());
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.pluginSettings);
+  }
+
+  openFocusForActiveNote(): void {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) { new Notice("请先打开一个计划笔记 / Open a plan note first."); return; }
+    const tasks = extractFocusTasks(this.app, file);
+    if (!tasks.length) { new Notice("当前笔记没有可专注的计划任务 / No plan tasks found."); return; }
+    new FocusTaskPickerModal(this.app, this, file, tasks).open();
   }
 
   async generatePlan(mode: PlanMode, date: string, startTime: string, endTime: string, input: string): Promise<PlanResult> {
@@ -128,7 +142,9 @@ export default class AIPlannerPlugin extends Plugin {
     const system = mode === "study"
       ? "You create practical same-day homework plans for a child. Break tasks into a sensible order, include short breaks when helpful, and only add review tasks grounded in the given homework."
       : "You create practical same-day work plans. Prioritize by urgency and cognitive load, include buffers, and do not invent work items.";
-    const user = `Plan date: ${date}\nStart time: ${startTime || "not specified"}\nLatest finish: ${endTime || "not specified"}\nItems:\n${input}\n\nReturn JSON only, with this shape: {"title":"short title","summary":"one sentence","tasks":[{"title":"task","category":"subject or project","startTime":"HH:mm","endTime":"HH:mm","estimatedMinutes":30,"description":"optional"}],"reviewTasks":[same task shape]}. Use [] for reviewTasks when none are justified.`;
+    const folder = mode === "study" ? this.pluginSettings.studyFolder : this.pluginSettings.workFolder;
+    const history = buildHistoryContext(this.app, folder, this.pluginSettings.historyDays);
+    const user = `Plan date: ${date}\nStart time: ${startTime || "not specified"}\nLatest finish: ${endTime || "not specified"}\nItems:\n${input}\n\nHistorical timing calibration:\n${history}\n\nUse the calibration only when it has at least two comparable records. Return JSON only, with this shape: {"title":"short title","summary":"one sentence","tasks":[{"title":"task","category":"subject or project","startTime":"HH:mm","endTime":"HH:mm","estimatedMinutes":30,"description":"optional"}],"reviewTasks":[same task shape]}. Use [] for reviewTasks when none are justified.`;
     const baseUrl = this.pluginSettings.apiBaseUrl.replace(/\/$/, "");
     const headers: Record<string, string> = { "Content-Type": "application/json", ...customHeaders };
     const response = await requestPlanCompletion(this.pluginSettings, baseUrl, headers, system, user);
@@ -149,6 +165,110 @@ export default class AIPlannerPlugin extends Plugin {
     else await this.app.vault.create(path, content);
     await this.app.workspace.openLinkText(path, "", true);
     return path;
+  }
+}
+
+interface FocusTask { id: string; name: string; category: string; estimatedMinutes: number; }
+
+function extractFocusTasks(app: App, file: TFile): FocusTask[] {
+  const fm = app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+  return Object.keys(fm).filter(key => /^task\d+Name$/.test(key)).sort().map(key => {
+    const id = key.replace("Name", "");
+    return { id, name: String(fm[key] ?? id), category: String(fm[`${id}Category`] ?? ""), estimatedMinutes: Number(fm[`${id}EstimatedMinutes`] ?? 0) };
+  });
+}
+
+function buildHistoryContext(app: App, folder: string, days: number): string {
+  const cutoff = Date.now() - days * 86400000;
+  const groups = new Map<string, { planned: number; actual: number; count: number }>();
+  for (const file of app.vault.getMarkdownFiles()) {
+    if (!file.path.startsWith(`${normalizePath(folder)}/`) || file.stat.mtime < cutoff) continue;
+    const fm = app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+    for (const key of Object.keys(fm).filter(item => /^task\d+Name$/.test(item))) {
+      const id = key.replace("Name", "");
+      const planned = Number(fm[`${id}EstimatedMinutes`] ?? 0);
+      const actual = Number(fm[`${id}ActualMinutes`] ?? 0) || durationFromTimes(fm[`${id}ActualStart`], fm[`${id}ActualEnd`]);
+      if (planned <= 0 || actual <= 0) continue;
+      const category = String(fm[`${id}Category`] ?? String(fm[key]).split("·")[0] ?? "其它").trim() || "其它";
+      const item = groups.get(category) ?? { planned: 0, actual: 0, count: 0 };
+      item.planned += planned; item.actual += actual; item.count += 1; groups.set(category, item);
+    }
+  }
+  const lines = [...groups.entries()].filter(([, value]) => value.count >= 2).sort((a, b) => b[1].count - a[1].count).slice(0, 6).map(([category, value]) => {
+    const percent = Math.round((value.actual / value.planned - 1) * 100);
+    return `${category}: ${value.count} records, planned ${value.planned} min, actual ${value.actual} min, deviation ${percent >= 0 ? "+" : ""}${percent}%`;
+  });
+  return lines.length ? lines.join("\n") : "No reliable historical records yet. Use reasonable estimates and a small buffer.";
+}
+
+function durationFromTimes(start: unknown, end: unknown): number {
+  const parse = (value: unknown): number | null => { const match = String(value ?? "").match(/^(\d{1,2}):(\d{2})$/); return match ? Number(match[1]) * 60 + Number(match[2]) : null; };
+  const from = parse(start), to = parse(end);
+  return from === null || to === null ? 0 : (to >= from ? to - from : to + 1440 - from);
+}
+
+class FocusTaskPickerModal extends Modal {
+  private minutes: number;
+  constructor(app: App, private readonly plugin: AIPlannerPlugin, private readonly file: TFile, private readonly tasks: FocusTask[]) { super(app); this.minutes = plugin.pluginSettings.focusMinutes; }
+  onOpen(): void {
+    this.modalEl.addClass("ai-planner-modal");
+    this.titleEl.setText("专注模式 / Focus mode");
+    new Setting(this.contentEl).setName("专注时长 / Focus duration").addDropdown(dropdown => dropdown.addOption("25", "25 min").addOption("50", "50 min").addOption("90", "90 min").setValue(String(this.minutes)).onChange(value => this.minutes = Number(value)));
+    const custom = this.contentEl.createEl("input", { type: "number", placeholder: "Custom minutes / 自定义分钟" });
+    custom.addEventListener("input", () => { const value = Number(custom.value); if (value > 0) this.minutes = value; });
+    this.contentEl.createEl("h3", { text: "选择任务 / Choose a task" });
+    for (const task of this.tasks) {
+      const button = this.contentEl.createEl("button", { cls: "ai-planner-focus-task" });
+      button.setText(`${task.category ? `${task.category} · ` : ""}${task.name} (${task.estimatedMinutes || "?"} min)`);
+      button.addEventListener("click", () => { this.close(); new FocusTimerModal(this.app, this.file, task, this.minutes).open(); });
+    }
+  }
+}
+
+class FocusTimerModal extends Modal {
+  private focusedMs = 0;
+  private runningAt: number | null = Date.now();
+  private interval: number | null = null;
+  private readonly startedAt = new Date();
+  private readonly durationMs: number;
+  constructor(app: App, private readonly file: TFile, private readonly task: FocusTask, minutes: number) { super(app); this.durationMs = minutes * 60000; }
+  onOpen(): void {
+    this.modalEl.addClass("ai-planner-modal", "ai-planner-focus-timer");
+    this.titleEl.setText("专注中 / Focusing");
+    this.contentEl.createEl("p", { text: this.task.name, cls: "ai-planner-focus-title" });
+    const clock = this.contentEl.createEl("div", { cls: "ai-planner-focus-clock" });
+    const action = this.contentEl.createDiv({ cls: "modal-button-container" });
+    const pause = action.createEl("button", { text: "暂停 / Pause" });
+    const finish = action.createEl("button", { text: "结束 / Finish", cls: "mod-cta" });
+    const refresh = (): void => {
+      const elapsed = this.focusedMs + (this.runningAt ? Date.now() - this.runningAt : 0);
+      const remaining = Math.max(0, this.durationMs - elapsed);
+      clock.setText(formatDuration(remaining));
+      if (remaining <= 0) void this.finish();
+    };
+    pause.addEventListener("click", () => {
+      if (this.runningAt) { this.focusedMs += Date.now() - this.runningAt; this.runningAt = null; pause.setText("继续 / Resume"); }
+      else { this.runningAt = Date.now(); pause.setText("暂停 / Pause"); }
+      refresh();
+    });
+    finish.addEventListener("click", () => void this.finish());
+    this.interval = window.setInterval(refresh, 500); refresh();
+  }
+  onClose(): void { if (this.interval !== null) window.clearInterval(this.interval); }
+  private async finish(): Promise<void> {
+    if (this.interval === null) return;
+    if (this.runningAt) { this.focusedMs += Date.now() - this.runningAt; this.runningAt = null; }
+    window.clearInterval(this.interval); this.interval = null;
+    const actualMinutes = Math.max(1, Math.round(this.focusedMs / 60000));
+    const end = new Date();
+    await this.app.fileManager.processFrontMatter(this.file, fm => {
+      fm[`${this.task.id}ActualStart`] ??= timeOfDay(this.startedAt);
+      fm[`${this.task.id}ActualEnd`] = timeOfDay(end);
+      fm[`${this.task.id}ActualMinutes`] = Number(fm[`${this.task.id}ActualMinutes`] ?? 0) + actualMinutes;
+      fm[`${this.task.id}FocusSessions`] = Number(fm[`${this.task.id}FocusSessions`] ?? 0) + 1;
+    });
+    new Notice(`已记录 ${actualMinutes} 分钟专注 / Focus recorded.`);
+    this.close();
   }
 }
 
@@ -310,6 +430,8 @@ class AIPlannerSettingTab extends PluginSettingTab {
     this.textSetting("自定义请求头 / Custom headers", "JSON object, optional.", "customHeaders");
     new Setting(this.containerEl).setName("温度 / Temperature").addText(input => input.setValue(String(this.plugin.pluginSettings.temperature)).onChange(async value => { this.plugin.pluginSettings.temperature = Number(value) || 0; await this.plugin.saveSettings(); }));
     new Setting(this.containerEl).setName("最大输出长度 / Max output tokens").addText(input => input.setValue(String(this.plugin.pluginSettings.maxTokens)).onChange(async value => { this.plugin.pluginSettings.maxTokens = Number(value) || DEFAULT_SETTINGS.maxTokens; await this.plugin.saveSettings(); }));
+    new Setting(this.containerEl).setName("历史校准天数 / History days").setDesc("生成计划时读取近期真实用时，建议 7-30 天。").addText(input => input.setValue(String(this.plugin.pluginSettings.historyDays)).onChange(async value => { this.plugin.pluginSettings.historyDays = Math.max(1, Number(value) || DEFAULT_SETTINGS.historyDays); await this.plugin.saveSettings(); }));
+    new Setting(this.containerEl).setName("默认专注分钟 / Default focus minutes").addText(input => input.setValue(String(this.plugin.pluginSettings.focusMinutes)).onChange(async value => { this.plugin.pluginSettings.focusMinutes = Math.max(1, Number(value) || DEFAULT_SETTINGS.focusMinutes); await this.plugin.saveSettings(); }));
     this.textSetting("学习输出目录 / Study output folder", "Vault-relative path.", "studyFolder");
     this.textSetting("工作输出目录 / Work output folder", "Vault-relative path.", "workFolder");
   }
@@ -340,7 +462,7 @@ function renderPlan(mode: PlanMode, date: string, plan: PlanResult): string {
   const allTasks = [...plan.tasks, ...(plan.reviewTasks ?? [])];
   const frontmatter = allTasks.flatMap((task, index) => {
     const id = `task${String(index + 1).padStart(2, "0")}`;
-    return [`${id}Name: ${yamlQuote(task.title)}`, `${id}EstimatedMinutes: ${task.estimatedMinutes}`, `${id}ActualStart:`, `${id}ActualEnd:`];
+    return [`${id}Name: ${yamlQuote(task.title)}`, `${id}Category: ${yamlQuote(task.category || "其它")}`, `${id}EstimatedMinutes: ${task.estimatedMinutes}`, `${id}ActualStart:`, `${id}ActualEnd:`, `${id}ActualMinutes: 0`, `${id}FocusSessions: 0`];
   });
   const taskCards = (label: string, tasks: PlanTask[], offset: number) => tasks.length ? `## ${label}\n\n${tasks.map((task, index) => renderTask(task, date, offset + index + 1)).join("\n\n")}` : `## ${label}\n\n暂无安排。`;
   return `---\ntype: ${mode === "study" ? "每日作业计划" : "每日工作计划"}\nplanDate: ${date}\ntags:\n  - AI计划\n${frontmatter.join("\n")}\n---\n\n# ${plan.title}\n\n> [!abstract] 概览\n> ${plan.summary || "由 AI Planner 生成，执行后填写每项实际开始和完成时间。"}\n\n${taskCards(mode === "study" ? "作业计划表" : "工作计划表", plan.tasks, 0)}\n\n${mode === "study" ? taskCards("复习计划表", plan.reviewTasks ?? [], plan.tasks.length) : ""}\n`;
@@ -370,4 +492,6 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 
 function safeFilename(value: string): string { return value.replace(/[\\/:*?"<>|]/g, "-").trim().slice(0, 80) || "AI计划"; }
 function yamlQuote(value: string): string { return JSON.stringify(value); }
+function timeOfDay(date: Date): string { return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`; }
+function formatDuration(milliseconds: number): string { const total = Math.ceil(milliseconds / 1000); return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`; }
 function localDate(): string { const now = new Date(); const offset = now.getTimezoneOffset() * 60000; return new Date(now.getTime() - offset).toISOString().slice(0, 10); }
