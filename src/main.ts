@@ -18,6 +18,7 @@ interface PlannerSettings {
   studyFolder: string;
   workFolder: string;
   activeFocus?: ActiveFocusSession;
+  focusMiniPosition?: { x: number; y: number };
 }
 
 interface ActiveFocusSession {
@@ -120,6 +121,13 @@ export default class AIPlannerPlugin extends Plugin {
   private focusStatusEl!: HTMLElement;
   private focusMiniEl!: HTMLButtonElement;
   private finishingFocus = false;
+  private focusTimerOpen = false;
+  private miniDragging = false;
+  private miniMoved = false;
+  private miniStartX = 0;
+  private miniStartY = 0;
+  private miniStartLeft = 0;
+  private miniStartTop = 0;
 
   async onload(): Promise<void> {
     this.pluginSettings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -140,7 +148,13 @@ export default class AIPlannerPlugin extends Plugin {
       cls: "ai-planner-focus-mini",
       attr: { type: "button", "aria-label": "Restore focus timer" }
     });
-    this.registerDomEvent(this.focusMiniEl, "click", () => void this.restoreFocusTimer());
+    this.registerDomEvent(this.focusMiniEl, "click", event => {
+      if (this.miniMoved) { event.preventDefault(); return; }
+      void this.restoreFocusTimer();
+    });
+    this.registerDomEvent(this.focusMiniEl, "pointerdown", event => this.beginMiniDrag(event));
+    this.registerDomEvent(window, "pointermove", event => this.moveMiniDrag(event));
+    this.registerDomEvent(window, "pointerup", () => void this.endMiniDrag());
     this.register(() => this.focusMiniEl.remove());
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
     await this.refreshFocusStatus();
@@ -152,6 +166,62 @@ export default class AIPlannerPlugin extends Plugin {
 
   getActiveFocus(): ActiveFocusSession | undefined {
     return this.pluginSettings.activeFocus;
+  }
+
+  setFocusTimerOpen(open: boolean): void {
+    this.focusTimerOpen = open;
+    void this.refreshFocusStatus();
+  }
+
+  private beginMiniDrag(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    const rect = this.focusMiniEl.getBoundingClientRect();
+    this.miniDragging = true;
+    this.miniMoved = false;
+    this.miniStartX = event.clientX;
+    this.miniStartY = event.clientY;
+    this.miniStartLeft = rect.left;
+    this.miniStartTop = rect.top;
+  }
+
+  private moveMiniDrag(event: PointerEvent): void {
+    if (!this.miniDragging) return;
+    const dx = event.clientX - this.miniStartX;
+    const dy = event.clientY - this.miniStartY;
+    if (!this.miniMoved && Math.hypot(dx, dy) < 6) return;
+    this.miniMoved = true;
+    event.preventDefault();
+    const rect = this.focusMiniEl.getBoundingClientRect();
+    const left = Math.min(Math.max(8, this.miniStartLeft + dx), Math.max(8, window.innerWidth - rect.width - 8));
+    const top = Math.min(Math.max(8, this.miniStartTop + dy), Math.max(8, window.innerHeight - rect.height - 8));
+    this.focusMiniEl.style.left = `${left}px`;
+    this.focusMiniEl.style.top = `${top}px`;
+    this.focusMiniEl.style.right = "auto";
+    this.focusMiniEl.style.bottom = "auto";
+  }
+
+  private async endMiniDrag(): Promise<void> {
+    if (!this.miniDragging) return;
+    this.miniDragging = false;
+    if (!this.miniMoved) return;
+    const rect = this.focusMiniEl.getBoundingClientRect();
+    const width = Math.max(1, window.innerWidth - rect.width);
+    const height = Math.max(1, window.innerHeight - rect.height);
+    this.pluginSettings.focusMiniPosition = { x: rect.left / width, y: rect.top / height };
+    await this.saveSettings();
+    window.setTimeout(() => { this.miniMoved = false; }, 0);
+  }
+
+  private applyMiniPosition(): void {
+    const position = this.pluginSettings.focusMiniPosition;
+    if (!position) return;
+    const rect = this.focusMiniEl.getBoundingClientRect();
+    const left = Math.min(Math.max(8, position.x * (window.innerWidth - rect.width)), Math.max(8, window.innerWidth - rect.width - 8));
+    const top = Math.min(Math.max(8, position.y * (window.innerHeight - rect.height)), Math.max(8, window.innerHeight - rect.height - 8));
+    this.focusMiniEl.style.left = `${left}px`;
+    this.focusMiniEl.style.top = `${top}px`;
+    this.focusMiniEl.style.right = "auto";
+    this.focusMiniEl.style.bottom = "auto";
   }
 
   async openFocusForActiveNote(): Promise<void> {
@@ -258,7 +328,7 @@ export default class AIPlannerPlugin extends Plugin {
       return;
     }
     this.focusStatusEl.style.display = "";
-    this.focusMiniEl.style.display = "";
+    this.focusMiniEl.style.display = this.focusTimerOpen ? "none" : "";
     const elapsed = session.focusedMs + (session.runningAt === null ? 0 : Math.max(0, Date.now() - session.runningAt));
     if (session.runningAt !== null && elapsed >= session.durationMs) {
       this.focusStatusEl.setText(`Focus complete · ${session.taskName}`);
@@ -270,6 +340,7 @@ export default class AIPlannerPlugin extends Plugin {
     this.focusStatusEl.setText(`${state} · ${session.taskName}`);
     this.focusMiniEl.setText(`${state} · ${session.taskName}`);
     this.focusStatusEl.setAttribute("aria-label", "Restore focus timer");
+    if (!this.focusTimerOpen) window.requestAnimationFrame(() => this.applyMiniPosition());
   }
 
   async generatePlan(mode: PlanMode, date: string, startTime: string, endTime: string, input: string): Promise<PlanResult> {
@@ -373,6 +444,7 @@ class FocusTimerModal extends Modal {
   onOpen(): void {
     const session = this.plugin.getActiveFocus();
     if (!session) { this.close(); return; }
+    this.plugin.setFocusTimerOpen(true);
     this.modalEl.addClass("ai-planner-modal", "ai-planner-focus-timer");
     this.titleEl.setText("专注中 / Focusing");
     this.contentEl.createEl("p", { text: session.taskName, cls: "ai-planner-focus-title" });
@@ -397,7 +469,10 @@ class FocusTimerModal extends Modal {
     finish.addEventListener("click", () => void this.plugin.finishFocus().then(() => this.close()));
     this.interval = window.setInterval(refresh, 500); refresh();
   }
-  onClose(): void { if (this.interval !== null) window.clearInterval(this.interval); }
+  onClose(): void {
+    if (this.interval !== null) window.clearInterval(this.interval);
+    this.plugin.setFocusTimerOpen(false);
+  }
 }
 
 class PlanInputModal extends Modal {
