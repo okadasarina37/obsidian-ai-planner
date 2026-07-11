@@ -105,12 +105,12 @@
 
   .ai-planner-modal {
     align-self: flex-end;
-    max-height: calc(100dvh - 1.5rem);
+    max-height: calc(var(--ai-planner-visible-height, 100dvh) - 1.5rem);
     margin: 0.75rem;
   }
 
   .ai-planner-modal .modal-content {
-    max-height: calc(100dvh - 9rem);
+    max-height: calc(var(--ai-planner-visible-height, 100dvh) - 9rem);
     padding-bottom: max(2rem, env(safe-area-inset-bottom));
   }
 

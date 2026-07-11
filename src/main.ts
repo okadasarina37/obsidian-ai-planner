@@ -156,6 +156,22 @@ export default class AIPlannerPlugin extends Plugin {
     this.registerDomEvent(window, "pointermove", event => this.moveMiniDrag(event));
     this.registerDomEvent(window, "pointerup", () => void this.endMiniDrag());
     this.register(() => this.focusMiniEl.remove());
+    const updateVisibleHeight = (): void => {
+      const height = window.visualViewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty("--ai-planner-visible-height", `${Math.round(height)}px`);
+    };
+    updateVisibleHeight();
+    if (window.visualViewport) {
+      const viewport = window.visualViewport;
+      viewport.addEventListener("resize", updateVisibleHeight);
+      this.register(() => viewport.removeEventListener("resize", updateVisibleHeight));
+    }
+    this.registerDomEvent(document, "focusin", event => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.matches("input, textarea, select")) return;
+      if (!target.closest(".ai-planner-modal")) return;
+      window.setTimeout(() => target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" }), 250);
+    });
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
     await this.refreshFocusStatus();
   }
