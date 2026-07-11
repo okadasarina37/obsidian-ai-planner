@@ -1,8 +1,12 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 
 type PlanMode = "study" | "work";
+type ProviderId = "custom" | "openai" | "claude" | "deepseek" | "glm" | "kimi" | "gemini";
+type InterfaceLanguage = "auto" | "zh" | "en";
 
 interface PlannerSettings {
+  provider: ProviderId;
+  interfaceLanguage: InterfaceLanguage;
   apiBaseUrl: string;
   apiKey: string;
   model: string;
@@ -30,6 +34,8 @@ interface PlanResult {
 }
 
 const DEFAULT_SETTINGS: PlannerSettings = {
+  provider: "custom",
+  interfaceLanguage: "auto",
   apiBaseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4.1-mini",
@@ -39,6 +45,59 @@ const DEFAULT_SETTINGS: PlannerSettings = {
   studyFolder: "06_Todo/学习",
   workFolder: "01_项目/工作计划"
 };
+
+const PROVIDERS: Record<ProviderId, { label: string; baseUrl: string; model: string }> = {
+  custom: { label: "Custom OpenAI-compatible / 自定义兼容接口", baseUrl: "", model: "" },
+  openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+  claude: { label: "Anthropic Claude", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514" },
+  deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  glm: { label: "Zhipu GLM / 智谱", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+  kimi: { label: "Kimi / Moonshot", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  gemini: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.0-flash" }
+};
+
+async function requestPlanCompletion(
+  settings: PlannerSettings,
+  baseUrl: string,
+  headers: Record<string, string>,
+  system: string,
+  user: string
+): Promise<Awaited<ReturnType<typeof requestUrl>>> {
+  if (settings.provider === "claude") {
+    if (settings.apiKey) headers["x-api-key"] = settings.apiKey;
+    headers["anthropic-version"] ??= "2023-06-01";
+    return requestUrl({
+      url: `${baseUrl}/messages`, method: "POST", headers,
+      body: JSON.stringify({ model: settings.model, max_tokens: settings.maxTokens, temperature: settings.temperature, system, messages: [{ role: "user", content: user }] }), throw: false
+    });
+  }
+  if (settings.provider === "gemini") {
+    const key = settings.apiKey ? `?key=${encodeURIComponent(settings.apiKey)}` : "";
+    return requestUrl({
+      url: `${baseUrl}/models/${encodeURIComponent(settings.model)}:generateContent${key}`, method: "POST", headers,
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: [{ text: user }] }], generationConfig: { temperature: settings.temperature, maxOutputTokens: settings.maxTokens, responseMimeType: "application/json" } }), throw: false
+    });
+  }
+  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+  return requestUrl({
+    url: `${baseUrl}/chat/completions`, method: "POST", headers,
+    body: JSON.stringify({ model: settings.model, temperature: settings.temperature, max_tokens: settings.maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: user }] }), throw: false
+  });
+}
+
+function completionText(provider: ProviderId, response: unknown): string | undefined {
+  const json = response as Record<string, unknown>;
+  if (provider === "claude") {
+    const content = json.content as Array<{ type?: string; text?: string }> | undefined;
+    return content?.filter(part => part.type === "text").map(part => part.text ?? "").join("");
+  }
+  if (provider === "gemini") {
+    const candidates = json.candidates as Array<{ content?: { parts?: Array<{ text?: string }> } }> | undefined;
+    return candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("");
+  }
+  const choices = json.choices as Array<{ message?: { content?: string } }> | undefined;
+  return choices?.[0]?.message?.content;
+}
 
 export default class AIPlannerPlugin extends Plugin {
   pluginSettings!: PlannerSettings;
@@ -70,23 +129,11 @@ export default class AIPlannerPlugin extends Plugin {
       ? "You create practical same-day homework plans for a child. Break tasks into a sensible order, include short breaks when helpful, and only add review tasks grounded in the given homework."
       : "You create practical same-day work plans. Prioritize by urgency and cognitive load, include buffers, and do not invent work items.";
     const user = `Plan date: ${date}\nStart time: ${startTime || "not specified"}\nLatest finish: ${endTime || "not specified"}\nItems:\n${input}\n\nReturn JSON only, with this shape: {"title":"short title","summary":"one sentence","tasks":[{"title":"task","category":"subject or project","startTime":"HH:mm","endTime":"HH:mm","estimatedMinutes":30,"description":"optional"}],"reviewTasks":[same task shape]}. Use [] for reviewTasks when none are justified.`;
-    const endpoint = `${this.pluginSettings.apiBaseUrl.replace(/\/$/, "")}/chat/completions`;
+    const baseUrl = this.pluginSettings.apiBaseUrl.replace(/\/$/, "");
     const headers: Record<string, string> = { "Content-Type": "application/json", ...customHeaders };
-    if (this.pluginSettings.apiKey) headers.Authorization = `Bearer ${this.pluginSettings.apiKey}`;
-    const response = await requestUrl({
-      url: endpoint,
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: this.pluginSettings.model,
-        temperature: this.pluginSettings.temperature,
-        max_tokens: this.pluginSettings.maxTokens,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }]
-      }),
-      throw: false
-    });
+    const response = await requestPlanCompletion(this.pluginSettings, baseUrl, headers, system, user);
     if (response.status < 200 || response.status >= 300) throw new Error(`API request failed (${response.status}): ${response.text.slice(0, 300)}`);
-    const content = response.json?.choices?.[0]?.message?.content;
+    const content = completionText(this.pluginSettings.provider, response.json);
     if (typeof content !== "string") throw new Error("The provider did not return a chat completion.");
     return parsePlan(content);
   }
@@ -116,23 +163,23 @@ class PlanInputModal extends Modal {
 
   onOpen(): void {
     this.modalEl.addClass("ai-planner-modal");
-    this.titleEl.setText("AI Planner");
-    new Setting(this.contentEl).setName("Mode").addDropdown(dropdown => dropdown
-      .addOption("study", "Homework / study")
-      .addOption("work", "Work")
+    this.titleEl.setText("AI Planner / AI 计划");
+    new Setting(this.contentEl).setName("模式 / Mode").addDropdown(dropdown => dropdown
+      .addOption("study", "作业与学习 / Homework & study")
+      .addOption("work", "工作 / Work")
       .setValue(this.mode)
       .onChange(value => this.mode = value as PlanMode));
-    new Setting(this.contentEl).setName("Plan date").addText(input => input
+    new Setting(this.contentEl).setName("计划日期 / Plan date").addText(input => input
       .setValue(this.date).setPlaceholder("YYYY-MM-DD").onChange(value => this.date = value));
-    new Setting(this.contentEl).setName("Start time").setDesc("For example, 19:00.").addText(input => input
+    new Setting(this.contentEl).setName("开始时间 / Start time").setDesc("例如 / Example: 19:00").addText(input => input
       .setValue(this.startTime).setPlaceholder("19:00").onChange(value => this.startTime = value));
-    new Setting(this.contentEl).setName("Latest finish").setDesc("Optional.").addText(input => input
+    new Setting(this.contentEl).setName("最晚结束 / Latest finish").setDesc("可选 / Optional.").addText(input => input
       .setValue(this.endTime).setPlaceholder("21:00").onChange(value => this.endTime = value));
-    new Setting(this.contentEl).setName("Tasks or homework").setDesc("Include subject/project, amount, deadline, and constraints.");
+    new Setting(this.contentEl).setName("任务或作业 / Tasks or homework").setDesc("填写科目/项目、任务量、截止时间和限制条件。");
     const sourceBar = this.contentEl.createDiv({ cls: "ai-planner-source" });
-    const sourceLabel = sourceBar.createSpan({ text: "Source: manual input" });
-    const useActiveButton = sourceBar.createEl("button", { text: "Use current note" });
-    const chooseButton = sourceBar.createEl("button", { text: "Choose Markdown note" });
+    const sourceLabel = sourceBar.createSpan({ text: "来源 / Source: 手动输入 / manual input" });
+    const useActiveButton = sourceBar.createEl("button", { text: "使用当前笔记 / Use current note" });
+    const chooseButton = sourceBar.createEl("button", { text: "选择 Markdown 笔记 / Choose note" });
     const area = this.contentEl.createEl("textarea", { cls: "ai-planner-input" });
     area.rows = 8;
     area.placeholder = "Example: Math workbook pages 12-14; memorize 20 English words; Chinese reading aloud.";
@@ -141,22 +188,22 @@ class PlanInputModal extends Modal {
       const content = await this.app.vault.read(file);
       this.input = content;
       area.value = content;
-      sourceLabel.setText(`Source: ${file.path}`);
+      sourceLabel.setText(`来源 / Source: ${file.path}`);
     };
     useActiveButton.addEventListener("click", async () => {
       const activeFile = this.app.workspace.getActiveFile();
-      if (!activeFile || activeFile.extension !== "md") return new Notice("Open a Markdown note first.");
+      if (!activeFile || activeFile.extension !== "md") return new Notice("请先打开一个 Markdown 笔记 / Open a Markdown note first.");
       try { await loadSource(activeFile); } catch { new Notice("Could not read the current note."); }
     });
     chooseButton.addEventListener("click", () => new MarkdownFilePickerModal(this.app, async file => {
       try { await loadSource(file); } catch { new Notice("Could not read that note."); }
     }).open());
     const action = this.contentEl.createDiv({ cls: "modal-button-container" });
-    const button = action.createEl("button", { text: "Generate preview", cls: "mod-cta" });
+    const button = action.createEl("button", { text: "生成预览 / Generate preview", cls: "mod-cta" });
     button.addEventListener("click", async () => {
-      if (!this.input.trim()) return new Notice("Enter at least one task first.");
+      if (!this.input.trim()) return new Notice("请至少填写一项任务 / Enter at least one task first.");
       button.disabled = true;
-      button.setText("Generating...");
+      button.setText("正在生成 / Generating...");
       try {
         const plan = await this.plugin.generatePlan(this.mode, this.date, this.startTime, this.endTime, this.input);
         this.close();
@@ -164,7 +211,7 @@ class PlanInputModal extends Modal {
       } catch (error) {
         new Notice(error instanceof Error ? error.message : "Could not generate plan.");
         button.disabled = false;
-        button.setText("Generate preview");
+        button.setText("生成预览 / Generate preview");
       }
     });
   }
@@ -183,8 +230,8 @@ class MarkdownFilePickerModal extends Modal {
 
   onOpen(): void {
     this.modalEl.addClass("ai-planner-modal", "ai-planner-file-picker");
-    this.titleEl.setText("Choose Markdown note");
-    const search = this.contentEl.createEl("input", { type: "search", placeholder: "Search notes...", cls: "ai-planner-file-search" });
+    this.titleEl.setText("选择 Markdown 笔记 / Choose note");
+    const search = this.contentEl.createEl("input", { type: "search", placeholder: "搜索笔记 / Search notes...", cls: "ai-planner-file-search" });
     search.addEventListener("input", () => { this.query = search.value.trim().toLowerCase(); this.renderResults(); });
     this.resultsEl = this.contentEl.createDiv({ cls: "ai-planner-file-results" });
     this.renderResults();
@@ -232,20 +279,39 @@ class AIPlannerSettingTab extends PluginSettingTab {
 
   display(): void {
     this.containerEl.empty();
-    this.containerEl.createEl("h2", { text: "AI Planner settings" });
-    this.containerEl.createEl("p", { text: "Uses the OpenAI-compatible /chat/completions API. Keep API keys out of synced vault settings when possible." });
-    this.textSetting("API base URL", "For example: https://api.openai.com/v1", "apiBaseUrl");
-    new Setting(this.containerEl).setName("API key").setDesc("Stored in this plugin's data.json.").addText(input => {
+    this.containerEl.createEl("h2", { text: "AI Planner 设置 / Settings" });
+    this.containerEl.createEl("p", { text: "Claude 与 Gemini 使用原生接口；其它预设使用 OpenAI-compatible 接口。Claude and Gemini use native API formats." });
+    new Setting(this.containerEl).setName("界面语言 / Interface language").addDropdown(dropdown => dropdown
+      .addOption("auto", "跟随系统 / Follow system")
+      .addOption("zh", "中文")
+      .addOption("en", "English")
+      .setValue(this.plugin.pluginSettings.interfaceLanguage)
+      .onChange(async value => { this.plugin.pluginSettings.interfaceLanguage = value as InterfaceLanguage; await this.plugin.saveSettings(); }));
+    new Setting(this.containerEl).setName("服务商预设 / Provider preset").setDesc("选择后会填入推荐地址与模型，可继续手动修改。").addDropdown(dropdown => {
+      for (const [id, preset] of Object.entries(PROVIDERS)) dropdown.addOption(id, preset.label);
+      dropdown.setValue(this.plugin.pluginSettings.provider).onChange(async value => {
+        const provider = value as ProviderId;
+        this.plugin.pluginSettings.provider = provider;
+        if (provider !== "custom") {
+          this.plugin.pluginSettings.apiBaseUrl = PROVIDERS[provider].baseUrl;
+          this.plugin.pluginSettings.model = PROVIDERS[provider].model;
+        }
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    });
+    this.textSetting("API 地址 / API base URL", "例如 / Example: https://api.openai.com/v1", "apiBaseUrl");
+    new Setting(this.containerEl).setName("API 密钥 / API key").setDesc("Stored in this plugin's data.json.").addText(input => {
       input.setValue(this.plugin.pluginSettings.apiKey).setPlaceholder("sk-...");
       input.inputEl.type = "password";
       input.onChange(async value => { this.plugin.pluginSettings.apiKey = value; await this.plugin.saveSettings(); });
     });
-    this.textSetting("Model", "For example: gpt-4.1-mini, deepseek-chat, qwen-plus", "model");
-    this.textSetting("Custom headers", "JSON object, optional.", "customHeaders");
-    new Setting(this.containerEl).setName("Temperature").addText(input => input.setValue(String(this.plugin.pluginSettings.temperature)).onChange(async value => { this.plugin.pluginSettings.temperature = Number(value) || 0; await this.plugin.saveSettings(); }));
-    new Setting(this.containerEl).setName("Max output tokens").addText(input => input.setValue(String(this.plugin.pluginSettings.maxTokens)).onChange(async value => { this.plugin.pluginSettings.maxTokens = Number(value) || DEFAULT_SETTINGS.maxTokens; await this.plugin.saveSettings(); }));
-    this.textSetting("Study output folder", "Vault-relative path.", "studyFolder");
-    this.textSetting("Work output folder", "Vault-relative path.", "workFolder");
+    this.textSetting("模型 / Model", "例如 / Example: gpt-4.1-mini, deepseek-chat, glm-4-flash", "model");
+    this.textSetting("自定义请求头 / Custom headers", "JSON object, optional.", "customHeaders");
+    new Setting(this.containerEl).setName("温度 / Temperature").addText(input => input.setValue(String(this.plugin.pluginSettings.temperature)).onChange(async value => { this.plugin.pluginSettings.temperature = Number(value) || 0; await this.plugin.saveSettings(); }));
+    new Setting(this.containerEl).setName("最大输出长度 / Max output tokens").addText(input => input.setValue(String(this.plugin.pluginSettings.maxTokens)).onChange(async value => { this.plugin.pluginSettings.maxTokens = Number(value) || DEFAULT_SETTINGS.maxTokens; await this.plugin.saveSettings(); }));
+    this.textSetting("学习输出目录 / Study output folder", "Vault-relative path.", "studyFolder");
+    this.textSetting("工作输出目录 / Work output folder", "Vault-relative path.", "workFolder");
   }
 
   private textSetting(name: string, desc: string, key: "apiBaseUrl" | "model" | "customHeaders" | "studyFolder" | "workFolder"): void {
