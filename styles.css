@@ -12,6 +12,46 @@
   resize: vertical;
 }
 
+.ai-planner-source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: -0.25rem 0 0.75rem;
+}
+
+.ai-planner-source span {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.ai-planner-file-search {
+  box-sizing: border-box;
+  width: 100%;
+  margin-bottom: 0.75rem;
+}
+
+.ai-planner-file-results {
+  max-height: min(55vh, 32rem);
+  overflow-y: auto;
+}
+
+.ai-planner-file-item {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.35rem;
+  text-align: left;
+}
+
+.ai-planner-file-item small {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 600px) {
   .ai-planner-modal {
     align-self: flex-end;

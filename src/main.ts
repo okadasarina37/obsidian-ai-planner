@@ -129,10 +129,28 @@ class PlanInputModal extends Modal {
     new Setting(this.contentEl).setName("Latest finish").setDesc("Optional.").addText(input => input
       .setValue(this.endTime).setPlaceholder("21:00").onChange(value => this.endTime = value));
     new Setting(this.contentEl).setName("Tasks or homework").setDesc("Include subject/project, amount, deadline, and constraints.");
+    const sourceBar = this.contentEl.createDiv({ cls: "ai-planner-source" });
+    const sourceLabel = sourceBar.createSpan({ text: "Source: manual input" });
+    const useActiveButton = sourceBar.createEl("button", { text: "Use current note" });
+    const chooseButton = sourceBar.createEl("button", { text: "Choose Markdown note" });
     const area = this.contentEl.createEl("textarea", { cls: "ai-planner-input" });
     area.rows = 8;
     area.placeholder = "Example: Math workbook pages 12-14; memorize 20 English words; Chinese reading aloud.";
     area.addEventListener("input", () => this.input = area.value);
+    const loadSource = async (file: TFile): Promise<void> => {
+      const content = await this.app.vault.read(file);
+      this.input = content;
+      area.value = content;
+      sourceLabel.setText(`Source: ${file.path}`);
+    };
+    useActiveButton.addEventListener("click", async () => {
+      const activeFile = this.app.workspace.getActiveFile();
+      if (!activeFile || activeFile.extension !== "md") return new Notice("Open a Markdown note first.");
+      try { await loadSource(activeFile); } catch { new Notice("Could not read the current note."); }
+    });
+    chooseButton.addEventListener("click", () => new MarkdownFilePickerModal(this.app, async file => {
+      try { await loadSource(file); } catch { new Notice("Could not read that note."); }
+    }).open());
     const action = this.contentEl.createDiv({ cls: "modal-button-container" });
     const button = action.createEl("button", { text: "Generate preview", cls: "mod-cta" });
     button.addEventListener("click", async () => {
@@ -149,6 +167,40 @@ class PlanInputModal extends Modal {
         button.setText("Generate preview");
       }
     });
+  }
+}
+
+class MarkdownFilePickerModal extends Modal {
+  private query = "";
+  private readonly files: TFile[];
+  private resultsEl: HTMLElement;
+
+  constructor(app: App, private readonly onChoose: (file: TFile) => void | Promise<void>) {
+    super(app);
+    this.files = app.vault.getMarkdownFiles().sort((a, b) => a.path.localeCompare(b.path));
+    this.resultsEl = document.createElement("div");
+  }
+
+  onOpen(): void {
+    this.modalEl.addClass("ai-planner-modal", "ai-planner-file-picker");
+    this.titleEl.setText("Choose Markdown note");
+    const search = this.contentEl.createEl("input", { type: "search", placeholder: "Search notes...", cls: "ai-planner-file-search" });
+    search.addEventListener("input", () => { this.query = search.value.trim().toLowerCase(); this.renderResults(); });
+    this.resultsEl = this.contentEl.createDiv({ cls: "ai-planner-file-results" });
+    this.renderResults();
+    search.focus();
+  }
+
+  private renderResults(): void {
+    this.resultsEl.empty();
+    const matches = this.files.filter(file => file.path.toLowerCase().includes(this.query)).slice(0, 100);
+    if (!matches.length) { this.resultsEl.createEl("p", { text: "No Markdown notes found." }); return; }
+    for (const file of matches) {
+      const button = this.resultsEl.createEl("button", { cls: "ai-planner-file-item" });
+      button.createEl("strong", { text: file.basename });
+      button.createEl("small", { text: file.path });
+      button.addEventListener("click", async () => { await this.onChoose(file); this.close(); });
+    }
   }
 }
 
