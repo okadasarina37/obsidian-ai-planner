@@ -1,0 +1,9 @@
+{
+  "id": "ai-planner",
+  "name": "AI Planner",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.0",
+  "description": "Create AI-assisted study and work plans using any OpenAI-compatible API.",
+  "author": "AI Planner Contributors",
+  "isDesktopOnly": false
+}
