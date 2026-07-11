@@ -5,6 +5,7 @@ type ProviderId = "custom" | "openai" | "claude" | "deepseek" | "glm" | "kimi" |
 type InterfaceLanguage = "auto" | "zh" | "en";
 
 const MOBILE_PLAN_EDITOR_VIEW = "ai-planner-mobile-editor";
+const MOBILE_MANUAL_TASK_EDITOR_VIEW = "ai-planner-mobile-manual-task-editor";
 
 interface PlannerSettings {
   provider: ProviderId;
@@ -141,7 +142,7 @@ export default class AIPlannerPlugin extends Plugin {
     });
     this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
     this.addCommand({ id: "resume-focus-session", name: "Resume focus session", callback: () => this.restoreFocusTimer() });
-    this.addCommand({ id: "create-manual-plan", name: "新建手动计划 / Create manual plan", callback: () => new ManualTaskModal(this.app, this).open() });
+    this.addCommand({ id: "create-manual-plan", name: "新建手动计划 / Create manual plan", callback: () => void this.openManualTaskEditor() });
     this.addCommand({ id: "add-task-to-current-plan", name: "向当前计划添加任务 / Add task to current plan", callback: () => this.openManualTaskForActiveNote() });
     this.addCommand({ id: "refresh-plan-summary", name: "刷新当前计划总结 / Refresh current plan summary", callback: () => void this.refreshPlanSummaryForActiveNote() });
     this.addRibbonIcon("calendar-plus", "Create AI plan", () => void this.openPlanEditor());
@@ -180,6 +181,7 @@ export default class AIPlannerPlugin extends Plugin {
     });
     this.registerInterval(window.setInterval(() => void this.refreshFocusStatus(), 500));
     this.registerView(MOBILE_PLAN_EDITOR_VIEW, leaf => new MobilePlanEditorView(leaf, this));
+    this.registerView(MOBILE_MANUAL_TASK_EDITOR_VIEW, leaf => new MobileManualTaskEditorView(leaf, this));
     await this.refreshFocusStatus();
   }
 
@@ -286,7 +288,21 @@ export default class AIPlannerPlugin extends Plugin {
   openManualTaskForActiveNote(): void {
     const file = this.app.workspace.getActiveFile();
     if (!file) { new Notice("请先打开一个计划笔记 / Open a plan note first."); return; }
+    if (Platform.isMobile) { void this.openManualTaskEditor(file); return; }
     new ManualTaskModal(this.app, this, file).open();
+  }
+
+  async openManualTaskEditor(file?: TFile): Promise<void> {
+    if (!Platform.isMobile) {
+      new ManualTaskModal(this.app, this, file).open();
+      return;
+    }
+    const existing = this.app.workspace.getLeavesOfType(MOBILE_MANUAL_TASK_EDITOR_VIEW)[0];
+    const leaf = existing ?? this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: MOBILE_MANUAL_TASK_EDITOR_VIEW, active: true });
+    const view = leaf.view;
+    if (view instanceof MobileManualTaskEditorView) view.configure(file);
+    this.app.workspace.revealLeaf(leaf);
   }
 
   async addManualTask(file: TFile | undefined, task: PlanTask, mode: PlanMode, date: string, planTitle: string): Promise<void> {
@@ -644,20 +660,9 @@ class MobilePlanEditorView extends ItemView {
     }).open());
 
     const action = this.contentEl.createDiv({ cls: "ai-planner-mobile-actions" });
-    const manual = action.createEl("button", { text: "手动创建 / Create manual" });
+    const manual = action.createEl("button", { text: "手动逐条填写 / Manual task form" });
     const generate = action.createEl("button", { text: "生成预览 / Generate preview", cls: "mod-cta" });
-    manual.addEventListener("click", async () => {
-      const tasks = this.input.split(/\r?\n/).map(title => title.trim()).filter(Boolean).map(title => ({ title, category: "其它", estimatedMinutes: 30 }));
-      if (!tasks.length) return new Notice("每行填写一项任务 / Enter one task per line.");
-      manual.disabled = true;
-      try {
-        await this.plugin.writePlan(this.mode, this.date, { title: `${this.date} ${this.mode === "study" ? "手动学习计划" : "手动工作计划"}`, summary: "手动建立。插件会根据任务记录自动更新执行总结。", tasks, reviewTasks: [] });
-        new Notice("手动计划已创建 / Manual plan created.");
-      } catch (error) {
-        new Notice(error instanceof Error ? error.message : "Could not create the manual plan.");
-        manual.disabled = false;
-      }
-    });
+    manual.addEventListener("click", () => void this.plugin.openManualTaskEditor());
     generate.addEventListener("click", async () => {
       if (!this.input.trim()) return new Notice("请至少填写一项任务 / Enter at least one task first.");
       generate.disabled = true;
@@ -687,6 +692,123 @@ class MobilePlanEditorView extends ItemView {
     input.value = value;
     input.addEventListener("input", () => onChange(input.value));
     return input;
+  }
+}
+
+class MobileManualTaskEditorView extends ItemView {
+  private targetFile?: TFile;
+  private mode: PlanMode = "study";
+  private date = localDate();
+  private planTitle = "";
+  private title = "";
+  private category = "";
+  private minutes = 30;
+  private startTime = "";
+  private endTime = "";
+  private description = "";
+
+  constructor(leaf: WorkspaceLeaf, private readonly plugin: AIPlannerPlugin) { super(leaf); }
+
+  getViewType(): string { return MOBILE_MANUAL_TASK_EDITOR_VIEW; }
+  getDisplayText(): string { return "Manual plan"; }
+  getIcon(): string { return "list-plus"; }
+
+  async onOpen(): Promise<void> { this.render(); }
+
+  configure(file?: TFile): void {
+    this.targetFile = file;
+    this.title = "";
+    this.category = "";
+    this.minutes = 30;
+    this.startTime = "";
+    this.endTime = "";
+    this.description = "";
+    if (!file) {
+      this.mode = "study";
+      this.date = localDate();
+      this.planTitle = "";
+    }
+    this.render();
+  }
+
+  private render(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("ai-planner-mobile-editor", "ai-planner-mobile-manual-editor");
+    this.contentEl.createEl("h1", { text: this.targetFile ? "添加计划任务 / Add task" : "手动创建计划 / Create manual plan" });
+    const form = this.contentEl.createDiv({ cls: "ai-planner-mobile-form" });
+
+    if (this.targetFile) {
+      form.createEl("p", { cls: "ai-planner-manual-target", text: `添加到 / Add to: ${this.targetFile.basename}` });
+    } else {
+      const mode = this.field(form, "模式 / Mode").createEl("select");
+      mode.createEl("option", { value: "study", text: "作业与学习 / Homework & study" });
+      mode.createEl("option", { value: "work", text: "工作 / Work" });
+      mode.value = this.mode;
+      mode.addEventListener("change", () => this.mode = mode.value as PlanMode);
+      const date = this.field(form, "计划日期 / Plan date").createEl("input", { type: "date" });
+      date.value = this.date;
+      date.addEventListener("input", () => this.date = date.value);
+      const planTitle = this.field(form, "计划标题 / Plan title", "可选，不填写则自动命名。 / Optional.").createEl("input", { type: "text" });
+      planTitle.value = this.planTitle;
+      planTitle.addEventListener("input", () => this.planTitle = planTitle.value);
+    }
+
+    const title = this.field(form, "任务内容 / Task", "一条表单只创建一项任务。 / One task per form.").createEl("input", { type: "text" });
+    title.value = this.title;
+    title.placeholder = "例如：完成数学练习册第 12-14 页";
+    title.addEventListener("input", () => this.title = title.value);
+
+    const category = this.field(form, "分类 / Category").createEl("input", { type: "text" });
+    category.value = this.category;
+    category.placeholder = "例如：数学 / 项目";
+    category.addEventListener("input", () => this.category = category.value);
+
+    const minutes = this.field(form, "预计时长（分钟）/ Estimated minutes").createEl("input", { type: "number" });
+    minutes.min = "1";
+    minutes.inputMode = "numeric";
+    minutes.value = String(this.minutes);
+    minutes.addEventListener("input", () => this.minutes = Math.max(1, Number(minutes.value) || 30));
+
+    this.timeInput(this.field(form, "开始时间 / Start time", "可选 / Optional."), this.startTime, value => this.startTime = value);
+    this.timeInput(this.field(form, "结束时间 / End time", "可选 / Optional."), this.endTime, value => this.endTime = value);
+
+    const description = this.field(form, "备注 / Notes", "可填写页码、截止时间或限制条件。 / Optional.").createEl("textarea", { cls: "ai-planner-input" });
+    description.rows = 3;
+    description.value = this.description;
+    description.addEventListener("input", () => this.description = description.value);
+
+    const action = this.contentEl.createDiv({ cls: "ai-planner-mobile-actions ai-planner-mobile-single-action" });
+    const submit = action.createEl("button", { text: this.targetFile ? "添加这条任务 / Add this task" : "创建计划 / Create plan", cls: "mod-cta" });
+    submit.addEventListener("click", async () => {
+      if (!this.title.trim()) return new Notice("请填写任务内容 / Enter a task first.");
+      submit.disabled = true;
+      try {
+        await this.plugin.addManualTask(this.targetFile, {
+          title: this.title.trim(), category: this.category.trim(), estimatedMinutes: this.minutes,
+          startTime: this.startTime, endTime: this.endTime, description: this.description.trim()
+        }, this.mode, this.date, this.planTitle.trim());
+        new Notice(this.targetFile ? "已添加任务并更新总结 / Task added and summary updated." : "手动计划已创建 / Manual plan created.");
+        this.title = ""; this.category = ""; this.minutes = 30; this.startTime = ""; this.endTime = ""; this.description = "";
+        this.render();
+      } catch (error) {
+        new Notice(error instanceof Error ? error.message : "Could not save the task.");
+        submit.disabled = false;
+      }
+    });
+  }
+
+  private field(parent: HTMLElement, label: string, description?: string): HTMLElement {
+    const field = parent.createDiv({ cls: "ai-planner-mobile-field" });
+    field.createEl("label", { text: label });
+    if (description) field.createEl("small", { text: description });
+    return field;
+  }
+
+  private timeInput(parent: HTMLElement, value: string, onChange: (value: string) => void): void {
+    const input = parent.createEl("input", { cls: "ai-planner-mobile-time", type: "time" });
+    input.step = "60";
+    input.value = value;
+    input.addEventListener("input", () => onChange(input.value));
   }
 }
 

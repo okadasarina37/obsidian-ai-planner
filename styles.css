@@ -78,6 +78,16 @@
   width: 100%;
 }
 
+.ai-planner-mobile-single-action {
+  grid-template-columns: 1fr;
+}
+
+.ai-planner-manual-target {
+  margin: 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 .ai-planner-source {
   display: flex;
   flex-wrap: wrap;
