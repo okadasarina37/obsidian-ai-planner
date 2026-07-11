@@ -141,9 +141,9 @@ export default class AIPlannerPlugin extends Plugin {
     });
     this.addCommand({ id: "start-focus-session", name: "Start focus session", callback: () => this.openFocusForActiveNote() });
     this.addCommand({ id: "resume-focus-session", name: "Resume focus session", callback: () => this.restoreFocusTimer() });
-    this.addCommand({ id: "create-manual-plan", name: "Create manual plan", callback: () => new ManualTaskModal(this.app, this).open() });
-    this.addCommand({ id: "add-task-to-current-plan", name: "Add task to current plan", callback: () => this.openManualTaskForActiveNote() });
-    this.addCommand({ id: "refresh-plan-summary", name: "Refresh current plan summary", callback: () => void this.refreshPlanSummaryForActiveNote() });
+    this.addCommand({ id: "create-manual-plan", name: "新建手动计划 / Create manual plan", callback: () => new ManualTaskModal(this.app, this).open() });
+    this.addCommand({ id: "add-task-to-current-plan", name: "向当前计划添加任务 / Add task to current plan", callback: () => this.openManualTaskForActiveNote() });
+    this.addCommand({ id: "refresh-plan-summary", name: "刷新当前计划总结 / Refresh current plan summary", callback: () => void this.refreshPlanSummaryForActiveNote() });
     this.addRibbonIcon("calendar-plus", "Create AI plan", () => void this.openPlanEditor());
     this.addRibbonIcon("timer", "Start focus session", () => this.openFocusForActiveNote());
     this.focusStatusEl = this.addStatusBarItem();
@@ -644,7 +644,20 @@ class MobilePlanEditorView extends ItemView {
     }).open());
 
     const action = this.contentEl.createDiv({ cls: "ai-planner-mobile-actions" });
+    const manual = action.createEl("button", { text: "手动创建 / Create manual" });
     const generate = action.createEl("button", { text: "生成预览 / Generate preview", cls: "mod-cta" });
+    manual.addEventListener("click", async () => {
+      const tasks = this.input.split(/\r?\n/).map(title => title.trim()).filter(Boolean).map(title => ({ title, category: "其它", estimatedMinutes: 30 }));
+      if (!tasks.length) return new Notice("每行填写一项任务 / Enter one task per line.");
+      manual.disabled = true;
+      try {
+        await this.plugin.writePlan(this.mode, this.date, { title: `${this.date} ${this.mode === "study" ? "手动学习计划" : "手动工作计划"}`, summary: "手动建立。插件会根据任务记录自动更新执行总结。", tasks, reviewTasks: [] });
+        new Notice("手动计划已创建 / Manual plan created.");
+      } catch (error) {
+        new Notice(error instanceof Error ? error.message : "Could not create the manual plan.");
+        manual.disabled = false;
+      }
+    });
     generate.addEventListener("click", async () => {
       if (!this.input.trim()) return new Notice("请至少填写一项任务 / Enter at least one task first.");
       generate.disabled = true;
