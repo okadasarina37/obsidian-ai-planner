@@ -105,13 +105,21 @@
 
   .ai-planner-modal {
     align-self: flex-end;
+    box-sizing: border-box;
+    display: flex;
+    height: calc(var(--ai-planner-visible-height, 100dvh) - 1.5rem);
     max-height: calc(var(--ai-planner-visible-height, 100dvh) - 1.5rem);
+    min-height: 0;
+    flex-direction: column;
     margin: 0.75rem;
   }
 
   .ai-planner-modal .modal-content {
-    max-height: calc(var(--ai-planner-visible-height, 100dvh) - 9rem);
+    box-sizing: border-box;
+    max-height: none;
     min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
     padding-bottom: max(2rem, env(safe-area-inset-bottom));
   }
 
