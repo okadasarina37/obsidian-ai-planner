@@ -550,13 +550,8 @@ class MobilePlanEditorView extends ItemView {
     date.value = this.date;
     date.addEventListener("input", () => this.date = date.value);
 
-    const start = this.field(form, "开始时间 / Start time", "可选 / Optional.").createEl("input", { type: "time" });
-    start.value = this.startTime;
-    start.addEventListener("input", () => this.startTime = start.value);
-
-    const end = this.field(form, "最晚结束 / Latest finish", "可选 / Optional.").createEl("input", { type: "time" });
-    end.value = this.endTime;
-    end.addEventListener("input", () => this.endTime = end.value);
+    const start = this.createMobileTimeInput(this.field(form, "开始时间 / Start time", "可选 / Optional."), this.startTime, value => this.startTime = value);
+    const end = this.createMobileTimeInput(this.field(form, "最晚结束 / Latest finish", "可选 / Optional."), this.endTime, value => this.endTime = value);
 
     this.field(form, "任务或作业 / Tasks or homework", "填写科目/项目、任务量、截止时间和限制条件。");
     const sourceBar = form.createDiv({ cls: "ai-planner-source" });
@@ -606,6 +601,22 @@ class MobilePlanEditorView extends ItemView {
     field.createEl("label", { text: label });
     if (description) field.createEl("small", { text: description });
     return field;
+  }
+
+  private createMobileTimeInput(parent: HTMLElement, value: string, onChange: (value: string) => void): HTMLInputElement {
+    const input = parent.createEl("input", { cls: "ai-planner-mobile-time", placeholder: "HH:mm" });
+    input.type = "text";
+    input.inputMode = "numeric";
+    input.autocomplete = "off";
+    input.maxLength = 5;
+    input.value = value;
+    input.addEventListener("input", () => onChange(input.value));
+    input.addEventListener("blur", () => {
+      const digits = input.value.replace(/\D/g, "");
+      if (/^\d{4}$/.test(digits)) input.value = `${digits.slice(0, 2)}:${digits.slice(2)}`;
+      onChange(input.value);
+    });
+    return input;
   }
 }
 

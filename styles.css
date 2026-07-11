@@ -54,6 +54,14 @@
   width: 100%;
 }
 
+.ai-planner-mobile-field .ai-planner-mobile-time {
+  appearance: none;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.75rem;
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+
 .ai-planner-mobile-actions {
   position: sticky;
   bottom: 0;
